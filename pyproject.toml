@@ -1,0 +1,16 @@
+[project]
+name = "scripter"
+version = "0.1.0"
+description = "Generate synchronized typing videos from speech audio."
+readme = "README.md"
+requires-python = ">=3.11,<3.15"
+dependencies = [
+    "faster-whisper>=1.2,<2",
+    "pillow>=11,<13",
+    "python-dotenv>=1.0,<2",
+    # PyAV 19 removed metadata_errors, which faster-whisper 1.2 uses.
+    "av>=11,<19",
+]
+
+[tool.uv]
+package = false
