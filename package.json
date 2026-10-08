@@ -1,0 +1,11 @@
+{
+  "name": "scripter-math",
+  "private": true,
+  "description": "Formula renderer for scripter's math blocks: AsciiMath2 -> LaTeX -> MathJax SVG -> PNG",
+  "type": "module",
+  "dependencies": {
+    "@resvg/resvg-js": "^2.6.2",
+    "asciimath-parser": "^0.6.11",
+    "mathjax-full": "^3.2.2"
+  }
+}

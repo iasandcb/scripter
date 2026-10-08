@@ -1,5 +1,6 @@
 import unittest
-from scripter import timeline, parse_time, select_range, crop_words
+from scripter import timeline, typing_stream, document_text, Math, parse_time, select_range, crop_words
+from spoken_math import SpokenMath
 import argparse
 import base64
 import io
@@ -70,7 +71,7 @@ class YoutubeTests(unittest.TestCase):
                        str(transcript), '--start', '2', '--end', '4', '--youtube']), \
                  patch.dict('os.environ', {'OPENAI_API_KEY': 'test'}), \
                  patch('scripter.shutil.which', return_value='tool'), \
-                 patch('scripter.Path.is_file', return_value=True), \
+                 patch('scripter.Path.is_file', lambda path: path.name != 'spoken-math.csv'), \
                  patch('scripter.Path.mkdir'), patch('scripter.Path.write_text'), \
                  patch('scripter.probe', return_value=10), patch('scripter.render') as render, \
                  patch('scripter.generate_youtube') as youtube:
@@ -112,21 +113,64 @@ class FixedFont:
 
 class TimelineTests(unittest.TestCase):
     def test_character_timing(self):
-        events = timeline([{'text': '가나다', 'start': 2, 'end': 5}], FixedFont(), 100, 2)
-        self.assertEqual(events, [(2, '가'), (3, '가나'), (4, '가나다')])
+        events = timeline(typing_stream([{'text': '가나다', 'start': 2, 'end': 5}]), FixedFont(), 100, 2)
+        self.assertEqual(events, [(2, ('가',)), (3, ('가나',)), (4, ('가나다',))])
 
     def test_clear_before_overflow(self):
-        events = timeline([{'text': '가나다라마', 'start': 0, 'end': 5}], FixedFont(), 20, 2)
-        self.assertEqual(events[3][1], '가나\n다라')
-        self.assertEqual(events[4], (4, '마'))
+        events = timeline(typing_stream([{'text': '가나다라마', 'start': 0, 'end': 5}]), FixedFont(), 20, 2)
+        self.assertEqual(events[3][1], ('가나', '다라'))
+        self.assertEqual(events[4], (4, ('마',)))
 
     def test_silence_and_overlapping_timestamps(self):
-        events = timeline([
+        events = timeline(typing_stream([
             {'text': '가', 'start': 1, 'end': 2},
             {'text': '나', 'start': 5, 'end': 6},
             {'text': '다', 'start': 5.5, 'end': 7},
-        ], FixedFont(), 100, 2)
+        ]), FixedFont(), 100, 2)
         self.assertEqual([at for at, _ in events], [1, 5, 6])
+
+
+SPOKEN = SpokenMath.from_csv("""수식시작, $$
+수식끝, $$
+엑스, x
+승, ^
+더하기, +
+라지에프, F
+에프, f
+이고, \\n
+는, =
+""")
+
+
+class SpokenMathTests(unittest.TestCase):
+    def test_conversion(self):
+        self.assertEqual(SPOKEN.to_asciimath('엑스 승 2 더하기 라지 에프.'), 'x ^ 2 + F')
+        self.assertEqual(SPOKEN.to_asciimath('F 는 X 이고 라지 F'), 'f = x\nF')
+
+    def test_block_commands_across_words(self):
+        # Whisper splits "수식 시작" into two words; the command still spans them.
+        words = [{'text': ' 정리하면', 'start': 0, 'end': 1},
+                 {'text': ' 수식', 'start': 1, 'end': 2}, {'text': ' 시작', 'start': 2, 'end': 3},
+                 {'text': ' 엑스', 'start': 3, 'end': 4}, {'text': ' 승', 'start': 4, 'end': 5},
+                 {'text': ' 2', 'start': 5, 'end': 6},
+                 {'text': ' 수식끝', 'start': 6, 'end': 7}, {'text': ' 입니다', 'start': 7, 'end': 8}]
+        stream = typing_stream(words, SPOKEN)
+        self.assertEqual([item[1] for item in stream if item[0] == 'math'], ['x', 'x ^', 'x ^ 2'])
+        self.assertEqual(document_text(stream), ' 정리하면\n\n$$\nx ^ 2\n$$\n\n입니다')
+        pages = [page for _, page in timeline(stream, FixedFont(), 100, 5)]
+        self.assertEqual(pages[-1], ('정리하면 ', Math('x ^ 2'), '입니다'))
+
+    def test_tall_formula_moves_to_a_new_page(self):
+        words = [{'text': '가나', 'start': 0, 'end': 1}, {'text': ' 수식시작', 'start': 1, 'end': 2},
+                 {'text': ' 엑스', 'start': 2, 'end': 3}, {'text': ' 수식끝', 'start': 3, 'end': 4}]
+        pages = [page for _, page in timeline(typing_stream(words, SPOKEN), FixedFont(), 100, 2,
+                                              math_lines=lambda source: 2)]
+        self.assertEqual(pages[-1], (Math('x'),))
+
+    def test_no_vocabulary_is_plain_text(self):
+        stream = typing_stream([{'text': '수식시작 엑스', 'start': 0, 'end': 1}])
+        self.assertEqual(document_text(stream), '수식시작 엑스')
+
 
 if __name__ == '__main__':
     unittest.main()

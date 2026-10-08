@@ -82,6 +82,25 @@ uv run scripter.py --duration 02:00 --transcript files/first-2min.words.json --f
 
 유튜브 공식 권장 형식: https://support.google.com/youtube/answer/1722171
 
+## 수식 받아쓰기
+
+말로 읽은 수식을 영상에서 조판된 수식으로 보여 줍니다. [mark-vector](https://github.com/iasandcb/mark-vector)의 수식 받아쓰기와 같은 규칙입니다.
+
+- "수식시작"이라고 말하면 수식 구간이 시작되고 "수식끝"에서 끝납니다. 그 사이의 말은 단어가 끝날 때마다 AsciiMath로 바뀌고, 지금까지의 수식이 조판되어 화면에 나타납니다. 수식은 가운데 정렬하며, 화면 폭이나 한 페이지보다 크면 줄여서 그립니다.
+- 규칙은 mark-vector의 **공용 수식 말**(`spoken-math.csv`)과 같은 CSV입니다. mark-vector에서 내려받아 `files/spoken-math.csv`에 두면 자동으로 쓰고, 다른 경로는 `--spoken-math 경로`로 지정합니다. 파일이 없으면 이전처럼 글자만 그립니다.
+- 예: "넓이는 수식 시작 적분 밑 영 위 일 엑스 승 이 디엑스 수식끝 입니다" → ∫₀¹ x² dx
+- `files/<이름>.txt`에는 수식 구간이 `$$ … $$` 문단으로 들어갑니다. `.words.json`은 인식 결과 그대로라서, 규칙을 고친 뒤 `--transcript`로 다시 렌더링할 수 있습니다.
+
+수식 조판에는 Node.js가 필요합니다(AsciiMath → LaTeX는 asciimath-parser, 그림은 MathJax + resvg, `math_render.mjs`).
+
+```sh
+brew install node
+npm install   # scripter 폴더에서 한 번
+uv run scripter.py --spoken-math files/spoken-math.csv
+```
+
+규칙에 없는 한글(예: "삼 분의 일"의 "분의")은 수식 글꼴에 한글이 없어 수식 안에서 보이지 않습니다. 자주 쓰는 말은 규칙에 추가하세요.
+
 ## 유튜브 업로드 자료 생성
 
 입력 음성을 `files`에 넣고 실행하세요. OpenAI API 키는 프로젝트 루트(`scripter.py` 옆)의 `.env` 또는 환경 변수에 설정하며 API 사용 요금이 발생합니다. 실행 시 `.env`를 자동으로 읽습니다. 기존 환경 변수는 `.env`보다 우선합니다.

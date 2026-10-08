@@ -6,12 +6,19 @@ import io
 import json
 import math
 import os
+import re
 import shutil
 import subprocess
 from pathlib import Path
+from typing import NamedTuple
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 from dotenv import load_dotenv
+from spoken_math import SpokenMath
+
+
+BACKGROUND = '#111827'
+TEXT_COLOR = '#f9fafb'
 
 
 def default_audio():
@@ -162,31 +169,132 @@ def transcribe(audio, model, language, cache, duration):
     return words
 
 
-def timeline(words, font, width, lines):
-    """Wrap by pixel width; clear immediately before first character of next page."""
-    events, page, line, previous = [], [''], 0, 0.0
+class Math(NamedTuple):
+    """A math block's row on the page: its AsciiMath source so far."""
+    source: str
+
+
+def typing_stream(words, spoken=None):
+    """What appears when: ('text', char, at) for each character, and - with a
+    spoken-math vocabulary - ('open', at) where "수식시작" was said, then
+    ('math', source, at) each time a word inside the block completes (the
+    whole block so far, as AsciiMath), and ('close', at) at "수식끝".
+    Characters are timed by splitting each word's span evenly."""
+    chars, previous = [], 0.0
     for word in words:
         text = word['text']
         start = max(previous, float(word['start']))
         end = max(start, float(word['end']))
-        for index, char in enumerate(text):
-            if char == '\n' or font.getlength(page[line] + char) > width:
-                line += 1
-                if line >= lines:
-                    page, line = [''], 0
-                else:
-                    page.append('')
-            if not page[line] and char.isspace():
-                continue
-            if char != '\n':
-                page[line] += char
-            at = start + (end - start) * index / max(1, len(text))
-            events.append((at, '\n'.join(page)))
+        chars += [(char, start + (end - start) * index / max(1, len(text)))
+                  for index, char in enumerate(text)]
         previous = end
+    full = ''.join(char for char, _ in chars)
+    commands = spoken.block_commands(full) if spoken else []
+    stream, position, inside, shown = [], 0, False, ''
+    for command_start, command_end in commands + [(len(full), len(full))]:
+        for index in range(position, command_start):
+            if not inside:
+                stream.append(('text', chars[index][0], chars[index][1]))
+            elif index + 1 == command_start or full[index + 1].isspace():
+                source = spoken.to_asciimath(full[position:index + 1])
+                if source.strip() and source != shown:
+                    stream.append(('math', source, chars[index][1]))
+                    shown = source
+        if command_start < len(full):
+            inside = not inside
+            stream.append(('open' if inside else 'close', chars[command_start][1]))
+            shown = ''
+        position = command_end
+    return stream
+
+
+def document_text(stream):
+    """The transcript as text, each math block as a $$ ... $$ paragraph."""
+    parts, block = [], None
+    for item in stream:
+        if item[0] == 'text':
+            parts.append(item[1])
+        elif item[0] == 'open':
+            block = ''
+        elif item[0] == 'math':
+            block = item[1]
+        elif item[0] == 'close' and block is not None:
+            parts.append(f'\n\n$$\n{block}\n$$\n\n' if block else '')
+            block = None
+    if block:
+        parts.append(f'\n\n$$\n{block}\n$$\n')
+    # The spaces the recognizer put around the spoken commands.
+    return re.sub(r'[ \t]*\n\n\$\$\n', '\n\n$$\n', re.sub(r'\n\$\$\n\n[ \t]+', '\n$$\n\n', ''.join(parts)))
+
+
+def timeline(stream, font, width, lines, math_lines=lambda source: 1):
+    """Wrap by pixel width; clear immediately before the first character (or
+    formula) that doesn't fit the page. A page is a tuple of rows - a text
+    row is a str, a math block a Math - and holds `lines` text rows' worth of
+    height; a math block takes math_lines(source) of that."""
+    events, page, previous = [], [''], None
+    height = lambda rows: sum(math_lines(row.source) if isinstance(row, Math) else 1 for row in rows)
+
+    def emit(at):
+        events.append((at, tuple(page)))
+
+    for item in stream:
+        kind, at = item[0], item[-1]
+        if kind == 'open':
+            previous = 'open'
+            continue
+        if kind == 'close':
+            previous = 'close'
+            continue
+        if kind == 'math':
+            row = Math(item[1])
+            if isinstance(page[-1], Math) and previous != 'open':
+                page[-1] = row
+            elif page[-1] == '':
+                page[-1] = row
+            else:
+                page.append(row)
+            if height(page) > lines and len(page) > 1:
+                page[:] = [row]
+            previous = 'math'
+            emit(at)
+            continue
+        char = item[1]
+        line = page[-1]
+        if isinstance(line, Math) or char == '\n' or font.getlength(line + char) > width:
+            page.append('')
+            if height(page) > lines:
+                page[:] = ['']
+        if not page[-1] and char.isspace():
+            continue
+        if char != '\n':
+            page[-1] += char
+        previous = 'text'
+        emit(at)
     return events
 
 
-def render(audio, output, words, duration, args):
+def render_math(sources, font_size, color):
+    """AsciiMath sources -> PIL images, via math_render.mjs (Node)."""
+    from PIL import Image
+    if not sources:
+        return {}
+    script = Path(__file__).resolve().parent / 'math_render.mjs'
+    if not shutil.which('node') or not (script.parent / 'node_modules').is_dir():
+        raise RuntimeError('수식 렌더링에는 Node.js와 의존성이 필요합니다. '
+                           'brew install node 후 scripter 폴더에서 npm install을 실행하세요.')
+    sources = sorted(sources)
+    result = subprocess.run(['node', str(script)], cwd=script.parent, check=True, capture_output=True,
+                            input=json.dumps({'items': sources, 'fontSize': font_size, 'color': color}).encode())
+    images = {}
+    for source, data in zip(sources, json.loads(result.stdout)['images']):
+        if data:
+            with Image.open(io.BytesIO(base64.b64decode(data))) as image:
+                images[source] = image.convert('RGBA')
+    return images
+
+
+def render(audio, output, stream, duration, args):
     from PIL import Image, ImageDraw, ImageFont
     font = ImageFont.truetype(str(args.font), args.font_size)
     margin = args.margin
@@ -195,7 +303,17 @@ def render(audio, output, words, duration, args):
     if args.width <= margin * 2 or args.height <= margin * 2 + line_height:
         raise ValueError('해상도에 비해 여백 또는 글꼴이 너무 큽니다.')
     rows = min(args.lines, (args.height - margin * 2) // line_height)
-    events = timeline(words, font, args.width - margin * 2, rows)
+    text_width = args.width - margin * 2
+    # Formulas are drawn at the text's size, shrunk only to fit the text
+    # width or a whole page.
+    images = render_math({item[1] for item in stream if item[0] == 'math'}, args.font_size, TEXT_COLOR)
+    for source, image in images.items():
+        scale = min(1.0, text_width / image.width, (rows * line_height - spacing) / image.height)
+        if scale < 1:
+            images[source] = image.resize((max(1, int(image.width * scale)), max(1, int(image.height * scale))),
+                                          Image.Resampling.LANCZOS)
+    math_lines = lambda source: (images[source].height + spacing) / line_height if source in images else 0
+    events = timeline(stream, font, text_width, rows, math_lines)
     times = [event[0] for event in events]
     cmd = ['ffmpeg', '-hide_banner', '-loglevel', 'warning', '-y', '-f', 'rawvideo', '-pix_fmt', 'rgb24', '-s', f'{args.width}x{args.height}', '-r', str(args.fps), '-i', '-', '-ss', str(args.start), '-i', str(audio), '-map', '0:v:0', '-map', '1:a:0', '-c:v', 'libx264', '-preset', 'veryfast', '-crf', '18', '-profile:v', 'high', '-pix_fmt', 'yuv420p', '-c:a', 'aac', '-b:a', '192k', '-ar', '48000', '-movflags', '+faststart', '-t', str(duration), str(output)]
     process = subprocess.Popen(cmd, stdin=subprocess.PIPE)
@@ -204,12 +322,21 @@ def render(audio, output, words, duration, args):
         for index in range(math.ceil(duration * args.fps)):
             at = index / args.fps
             position = bisect.bisect_right(times, at) - 1
-            text = events[position][1] if position >= 0 else ''
-            if text != previous:
-                image = Image.new('RGB', (args.width, args.height), '#111827')
+            page = events[position][1] if position >= 0 else ()
+            if page != previous:
+                image = Image.new('RGB', (args.width, args.height), BACKGROUND)
                 draw = ImageDraw.Draw(image)
-                draw.multiline_text((margin, margin), text, font=font, fill='#f9fafb', spacing=spacing)
-                frame, previous = image.tobytes(), text
+                y = margin
+                for row in page:
+                    if isinstance(row, Math):
+                        formula = images.get(row.source)
+                        if formula:
+                            image.paste(formula, (margin + (text_width - formula.width) // 2, y), formula)
+                            y += formula.height + spacing
+                    else:
+                        draw.text((margin, y), row, font=font, fill=TEXT_COLOR)
+                        y += line_height
+                frame, previous = image.tobytes(), page
             process.stdin.write(frame)
             if index % (args.fps * 10) == 0:
                 print(progress('렌더링', at, duration), flush=True)
@@ -246,6 +373,8 @@ def main():
     parser.add_argument('--font-size', type=int, default=80, help='글꼴 크기(px), 기본 80')
     parser.add_argument('--margin', type=int, default=120)
     parser.add_argument('--lines', type=int, default=7)
+    parser.add_argument('--spoken-math', type=Path, help='수식 말 규칙 CSV (기본 files/spoken-math.csv가 있으면 사용). '
+                        '"수식시작" ... "수식끝" 구간을 조판된 수식으로 표시')
     args = parser.parse_args()
     if args.audio is not None and args.input is not None:
         parser.error('위치 인자와 --input 중 하나로만 입력 파일을 지정하세요.')
@@ -261,6 +390,10 @@ def main():
             parser.error(f'{tool}가 필요합니다.')
     if not args.audio.is_file() or not args.font.is_file():
         parser.error('음성 파일과 한글 폰트 경로를 확인하세요.')
+    if args.spoken_math is None and Path('files/spoken-math.csv').is_file():
+        args.spoken_math = Path('files/spoken-math.csv')
+    if args.spoken_math is not None and not args.spoken_math.is_file():
+        parser.error(f'수식 말 규칙 파일이 없습니다: {args.spoken_math}')
     if min(args.width, args.height, args.fps, args.lines, args.font_size) <= 0 or args.margin < 0 or args.width % 2 or args.height % 2:
         parser.error('해상도는 양의 짝수, fps/줄 수/글꼴 크기는 양수여야 합니다.')
     total = probe(args.audio)
@@ -285,11 +418,13 @@ def main():
         words = [dict(word, start=word['start'] + args.start, end=word['end'] + args.start) for word in words]
     words = [word for word in words if float(word['end']) > args.start and float(word['start']) < end]
     transcript.write_text(json.dumps(words, ensure_ascii=False, indent=2))
-    text = ''.join(word['text'] for word in words)
-    args.output.with_suffix('.txt').write_text(text, encoding='utf-8')
     if not words:
         raise RuntimeError('인식된 음성이 없습니다. 언어/오디오를 확인하세요.')
-    render(args.audio, args.output, crop_words(words, args.start, end), duration, args)
+    spoken = SpokenMath.from_csv(args.spoken_math.read_text(encoding='utf-8')) if args.spoken_math else None
+    stream = typing_stream(crop_words(words, args.start, end), spoken)
+    text = document_text(stream)
+    args.output.with_suffix('.txt').write_text(text, encoding='utf-8')
+    render(args.audio, args.output, stream, duration, args)
     if args.youtube:
         generate_youtube(text, args.output, args.youtube_model, args.youtube_image_model)
     print(f'완료: {args.output.resolve()}')
