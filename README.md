@@ -92,7 +92,7 @@ uv run scripter.py --duration 02:00 --transcript files/first-2min.words.json --f
 - 예: "넓이는 수식 시작 인테그랄 영에서 일 까지 엑스 승 이 디엑스 는 삼 분의 일 수식끝 입니다" → ∫₀¹ x² dx = 1/3
 - `files/<이름>.txt`에는 수식 구간이 `$$ … $$` 문단으로 들어갑니다. `.words.json`은 인식 결과 그대로라서, 규칙을 고친 뒤 `--transcript`로 다시 렌더링할 수 있습니다.
 
-수식 기능에는 Node.js가 필요합니다(`math.mjs`). 말 → AsciiMath 변환은 mark-vector와 같은 [asciimath-markdown](https://github.com/iasandcb/asciimath-markdown)의 `spoken-math`를 그대로 쓰므로, 변환 규칙의 처리 방식이 바뀌면 그 패키지 버전만 올리면 됩니다(`npm update asciimath-markdown`). 그림은 asciimath-parser(LaTeX) → MathJax(SVG) → resvg(PNG)로 만듭니다.
+수식 기능에는 Node.js가 필요합니다(`math.mjs`). 말 → AsciiMath 변환은 mark-vector와 같은 [asciimath-markdown](https://github.com/iasandcb/asciimath-markdown)의 `spoken-math`를 그대로 쓰므로, 변환 규칙의 처리 방식이 바뀌면 그 패키지 버전만 올리면 됩니다(`npm update asciimath-markdown`). 그림도 mark-vector와 같은 LaTeX(asciimath-markdown의 `asciiMathBlockToTex`) → MathJax(SVG) → resvg(PNG)로 만들어, 정적분 대괄호 높이 같은 조판 규칙이 두 앱에서 같습니다.
 
 ```sh
 brew install node
