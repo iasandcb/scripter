@@ -1,6 +1,5 @@
 import unittest
-from scripter import timeline, typing_stream, document_text, Math, parse_time, select_range, crop_words
-from spoken_math import SpokenMath
+from scripter import timeline, typing_stream, document_text, Math, SpokenMath, parse_time, select_range, crop_words
 import argparse
 import base64
 import io
@@ -130,7 +129,7 @@ class TimelineTests(unittest.TestCase):
         self.assertEqual([at for at, _ in events], [1, 5, 6])
 
 
-SPOKEN = SpokenMath.from_csv("""수식시작, $$
+SPOKEN = SpokenMath("""수식시작, $$
 수식끝, $$
 엑스, x
 승, ^
@@ -144,8 +143,9 @@ SPOKEN = SpokenMath.from_csv("""수식시작, $$
 
 class SpokenMathTests(unittest.TestCase):
     def test_conversion(self):
-        self.assertEqual(SPOKEN.to_asciimath('엑스 승 2 더하기 라지 에프.'), 'x ^ 2 + F')
-        self.assertEqual(SPOKEN.to_asciimath('F 는 X 이고 라지 F'), 'f = x\nF')
+        # Converted by asciimath-markdown, the converter mark-vector uses.
+        self.assertEqual(SPOKEN.convert(['엑스 승 2 더하기 라지 에프.', 'F 는 X 이고 라지 F']),
+                         ['x ^ 2 + F', 'f = x\nF'])
 
     def test_block_commands_across_words(self):
         # Whisper splits "수식 시작" into two words; the command still spans them.
