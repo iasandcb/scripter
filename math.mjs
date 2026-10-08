@@ -4,14 +4,13 @@
 //   converter, the very one behind mark-vector's math dictation
 //     {"op": "commands", "vocabulary": csv, "text": t}  -> {"spans": [[start, end], ...]}
 //     {"op": "convert", "vocabulary": csv, "items": [...]} -> {"items": [...]}
-// - AsciiMath2 -> PNG: LaTeX with asciimath-parser (configured like
-//   asciimath-markdown, so a formula looks the same in both), then MathJax
-//   SVG, then resvg. No browser involved.
+// - AsciiMath2 -> PNG: the LaTeX asciimath-markdown renders in mark-vector
+//   (asciiMathBlockToTex - same symbols, row layout and bracket sizing),
+//   then MathJax SVG, then resvg. No browser involved.
 //     {"op": "render", "items": [...], "fontSize": 80, "color": "#f9fafb"}
 //       -> {"images": ["<base64 PNG>", ...]}
 // One JSON request on stdin, one response on stdout.
 import { createRequire } from "node:module";
-import { AsciiMath, TokenTypes } from "asciimath-parser";
 import { Resvg } from "@resvg/resvg-js";
 import {
   parseSpokenMathCsv,
@@ -19,6 +18,7 @@ import {
   spokenMathToAsciiMath,
   findMathBlockCommands,
 } from "asciimath-markdown/spoken-math";
+import { asciiMathBlockToTex } from "asciimath-markdown";
 
 const require = createRequire(import.meta.url);
 const { mathjax } = require("mathjax-full/js/mathjax.js");
@@ -27,28 +27,6 @@ const { SVG } = require("mathjax-full/js/output/svg.js");
 const { liteAdaptor } = require("mathjax-full/js/adaptors/liteAdaptor.js");
 const { RegisterHTMLHandler } = require("mathjax-full/js/handlers/html.js");
 const { AllPackages } = require("mathjax-full/js/input/tex/AllPackages.js");
-
-// Same overrides as asciimath-markdown: "<=" / ">=" are plain \le / \ge.
-const asciiMath = new AsciiMath({
-  display: false,
-  symbols: [
-    ["<=", { type: TokenTypes.Const, tex: "\\le" }],
-    [">=", { type: TokenTypes.Const, tex: "\\ge" }],
-  ],
-});
-
-// One row per line, like a $$ block in mark-vector: rows go to the parser
-// separated by blank lines, and rows with nothing to align on (&) are each
-// centered (gathered) rather than right-aligned to a shared edge (aligned).
-function toTex(source) {
-  const rows = source.split("\n").map((line) => line.trim()).filter(Boolean);
-  if (!rows.length) return "";
-  let tex = asciiMath.toTex(rows.join("\n\n"), { display: true });
-  if (!source.includes("&")) {
-    tex = tex.replace(/\\begin\{aligned\}/g, "\\begin{gathered}").replace(/\\end\{aligned\}/g, "\\end{gathered}");
-  }
-  return tex;
-}
 
 const adaptor = liteAdaptor();
 RegisterHTMLHandler(adaptor);
@@ -60,7 +38,7 @@ const doc = mathjax.document("", {
 function render(source, fontSize, color) {
   let tex;
   try {
-    tex = toTex(source);
+    tex = asciiMathBlockToTex(source);
   } catch (err) {
     tex = `\\text{${source.replace(/[\\{}]/g, "")}}`;
   }
