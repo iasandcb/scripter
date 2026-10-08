@@ -87,7 +87,8 @@ uv run scripter.py --duration 02:00 --transcript files/first-2min.words.json --f
 말로 읽은 수식을 영상에서 조판된 수식으로 보여 줍니다. [mark-vector](https://github.com/iasandcb/mark-vector)의 수식 받아쓰기와 같은 규칙입니다.
 
 - "수식시작"이라고 말하면 수식 구간이 시작되고 "수식끝"에서 끝납니다. 그 사이의 말은 단어가 끝날 때마다 AsciiMath로 바뀌고, 지금까지의 수식이 조판되어 화면에 나타납니다. 수식은 가운데 정렬하며, 화면 폭이나 한 페이지보다 크면 줄여서 그립니다.
-- 규칙은 mark-vector의 **공용 수식 말**(`spoken-math.csv`)과 같은 CSV입니다. mark-vector에서 내려받아 `files/spoken-math.csv`에 두면 자동으로 쓰고, 다른 경로는 `--spoken-math 경로`로 지정합니다. 파일이 없으면 이전처럼 글자만 그립니다.
+- 규칙은 mark-vector의 **공용 수식 말**입니다. 실행할 때마다 mark-vector(`https://markvector.fly.dev/api/public/spoken-math`, 로그인 불필요)에서 최신 규칙을 받아 `files/spoken-math.csv`에 저장하고 그것을 씁니다. 그래서 mark-vector에서 규칙을 고친 뒤 scripter를 다시 실행하기만 하면 됩니다. 받지 못하면(오프라인 등) 마지막으로 저장된 파일을 쓰고, 그것도 없으면 이전처럼 글자만 그립니다.
+- 다른 규칙 파일을 쓰려면 `--spoken-math 경로`(서버에서 받지 않음), 받을 주소를 바꾸려면 `--spoken-math-url 주소`, 받지 않고 저장된 파일만 쓰려면 `--spoken-math-url ''`.
 - 예: "넓이는 수식 시작 인테그랄 영에서 일 까지 엑스 승 이 디엑스 는 삼 분의 일 수식끝 입니다" → ∫₀¹ x² dx = 1/3
 - `files/<이름>.txt`에는 수식 구간이 `$$ … $$` 문단으로 들어갑니다. `.words.json`은 인식 결과 그대로라서, 규칙을 고친 뒤 `--transcript`로 다시 렌더링할 수 있습니다.
 
@@ -96,7 +97,7 @@ uv run scripter.py --duration 02:00 --transcript files/first-2min.words.json --f
 ```sh
 brew install node
 npm install   # scripter 폴더에서 한 번
-uv run scripter.py --spoken-math files/spoken-math.csv
+uv run scripter.py   # 규칙은 mark-vector에서 받아 옴
 ```
 
 규칙에 없는 한글은 수식 글꼴에 한글이 없어 수식 안에서 보이지 않습니다. 자주 쓰는 말은 규칙에 추가하세요. 분수("삼 분의 일")처럼 한국어와 AsciiMath의 순서가 다른 말은 규칙의 `{1}`·`{2}`로 처리합니다(asciimath-markdown README 참고).
