@@ -1,13 +1,24 @@
-// Renders scripter's math blocks to PNG: AsciiMath2 -> LaTeX with
-// asciimath-parser (configured like asciimath-markdown, the renderer
-// mark-vector uses, so a formula looks the same in both), then LaTeX -> SVG
-// with MathJax, then SVG -> PNG with resvg. No browser involved.
+// scripter's math, in Node so it shares code with mark-vector:
 //
-// stdin:  {"items": ["x ^ 2 + 5", ...], "fontSize": 80, "color": "#f9fafb"}
-// stdout: {"images": ["<base64 PNG>", ...]} in the same order
+// - spoken Korean math -> AsciiMath2 with asciimath-markdown's spoken-math
+//   converter, the very one behind mark-vector's math dictation
+//     {"op": "commands", "vocabulary": csv, "text": t}  -> {"spans": [[start, end], ...]}
+//     {"op": "convert", "vocabulary": csv, "items": [...]} -> {"items": [...]}
+// - AsciiMath2 -> PNG: LaTeX with asciimath-parser (configured like
+//   asciimath-markdown, so a formula looks the same in both), then MathJax
+//   SVG, then resvg. No browser involved.
+//     {"op": "render", "items": [...], "fontSize": 80, "color": "#f9fafb"}
+//       -> {"images": ["<base64 PNG>", ...]}
+// One JSON request on stdin, one response on stdout.
 import { createRequire } from "node:module";
 import { AsciiMath, TokenTypes } from "asciimath-parser";
 import { Resvg } from "@resvg/resvg-js";
+import {
+  parseSpokenMathCsv,
+  setSpokenMathVocabulary,
+  spokenMathToAsciiMath,
+  findMathBlockCommands,
+} from "asciimath-markdown/spoken-math";
 
 const require = createRequire(import.meta.url);
 const { mathjax } = require("mathjax-full/js/mathjax.js");
@@ -68,5 +79,15 @@ function render(source, fontSize, color) {
 
 let input = "";
 for await (const chunk of process.stdin) input += chunk;
-const { items, fontSize = 80, color = "#000000" } = JSON.parse(input);
-process.stdout.write(JSON.stringify({ images: items.map((item) => render(item, fontSize, color)) }));
+const request = JSON.parse(input);
+if (request.vocabulary !== undefined) setSpokenMathVocabulary(parseSpokenMathCsv(request.vocabulary));
+let response;
+if (request.op === "commands") {
+  response = { spans: findMathBlockCommands(request.text) };
+} else if (request.op === "convert") {
+  response = { items: request.items.map(spokenMathToAsciiMath) };
+} else {
+  const { items, fontSize = 80, color = "#000000" } = request;
+  response = { images: items.map((item) => render(item, fontSize, color)) };
+}
+process.stdout.write(JSON.stringify(response));

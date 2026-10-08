@@ -14,7 +14,6 @@ from typing import NamedTuple
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 from dotenv import load_dotenv
-from spoken_math import SpokenMath
 
 
 BACKGROUND = '#111827'
@@ -169,6 +168,35 @@ def transcribe(audio, model, language, cache, duration):
     return words
 
 
+def node_math(request):
+    """One request to math.mjs (Node): spoken math conversion through
+    asciimath-markdown - the converter mark-vector's dictation uses - and
+    formula rendering."""
+    script = Path(__file__).resolve().parent / 'math.mjs'
+    if not shutil.which('node') or not (script.parent / 'node_modules').is_dir():
+        raise RuntimeError('수식 기능에는 Node.js와 의존성이 필요합니다. '
+                           'brew install node 후 scripter 폴더에서 npm install을 실행하세요.')
+    result = subprocess.run(['node', str(script)], cwd=script.parent, check=True, capture_output=True,
+                            input=json.dumps(request).encode())
+    return json.loads(result.stdout)
+
+
+class SpokenMath:
+    """A spoken-math vocabulary (mark-vector's "공용 수식 말" CSV)."""
+    def __init__(self, vocabulary):
+        self.vocabulary = vocabulary
+
+    def block_commands(self, text):
+        """[(start, end)] of every "수식시작"/"수식끝"-style command in text."""
+        return [tuple(span) for span in node_math({'op': 'commands', 'vocabulary': self.vocabulary, 'text': text})['spans']]
+
+    def convert(self, items):
+        """Spoken texts -> AsciiMath, in one call."""
+        if not items:
+            return []
+        return node_math({'op': 'convert', 'vocabulary': self.vocabulary, 'items': list(items)})['items']
+
+
 class Math(NamedTuple):
     """A math block's row on the page: its AsciiMath source so far."""
     source: str
@@ -190,21 +218,31 @@ def typing_stream(words, spoken=None):
         previous = end
     full = ''.join(char for char, _ in chars)
     commands = spoken.block_commands(full) if spoken else []
-    stream, position, inside, shown = [], 0, False, ''
+    # First where everything goes, then every block's spoken-so-far texts
+    # converted in one batch.
+    plan, position, inside = [], 0, False
     for command_start, command_end in commands + [(len(full), len(full))]:
         for index in range(position, command_start):
             if not inside:
-                stream.append(('text', chars[index][0], chars[index][1]))
+                plan.append(('text', chars[index][0], chars[index][1]))
             elif index + 1 == command_start or full[index + 1].isspace():
-                source = spoken.to_asciimath(full[position:index + 1])
-                if source.strip() and source != shown:
-                    stream.append(('math', source, chars[index][1]))
-                    shown = source
+                plan.append(('spoken', full[position:index + 1], chars[index][1]))
         if command_start < len(full):
             inside = not inside
-            stream.append(('open' if inside else 'close', chars[command_start][1]))
-            shown = ''
+            plan.append(('open' if inside else 'close', chars[command_start][1]))
         position = command_end
+    sources = iter(spoken.convert([item[1] for item in plan if item[0] == 'spoken']) if spoken else [])
+    stream, shown = [], ''
+    for item in plan:
+        if item[0] == 'spoken':
+            source = next(sources)
+            if source.strip() and source != shown:
+                stream.append(('math', source, item[2]))
+                shown = source
+            continue
+        if item[0] in ('open', 'close'):
+            shown = ''
+        stream.append(item)
     return stream
 
 
@@ -275,19 +313,14 @@ def timeline(stream, font, width, lines, math_lines=lambda source: 1):
 
 
 def render_math(sources, font_size, color):
-    """AsciiMath sources -> PIL images, via math_render.mjs (Node)."""
+    """AsciiMath sources -> PIL images."""
     from PIL import Image
     if not sources:
         return {}
-    script = Path(__file__).resolve().parent / 'math_render.mjs'
-    if not shutil.which('node') or not (script.parent / 'node_modules').is_dir():
-        raise RuntimeError('수식 렌더링에는 Node.js와 의존성이 필요합니다. '
-                           'brew install node 후 scripter 폴더에서 npm install을 실행하세요.')
     sources = sorted(sources)
-    result = subprocess.run(['node', str(script)], cwd=script.parent, check=True, capture_output=True,
-                            input=json.dumps({'items': sources, 'fontSize': font_size, 'color': color}).encode())
     images = {}
-    for source, data in zip(sources, json.loads(result.stdout)['images']):
+    response = node_math({'op': 'render', 'items': sources, 'fontSize': font_size, 'color': color})
+    for source, data in zip(sources, response['images']):
         if data:
             with Image.open(io.BytesIO(base64.b64decode(data))) as image:
                 images[source] = image.convert('RGBA')
@@ -420,7 +453,7 @@ def main():
     transcript.write_text(json.dumps(words, ensure_ascii=False, indent=2))
     if not words:
         raise RuntimeError('인식된 음성이 없습니다. 언어/오디오를 확인하세요.')
-    spoken = SpokenMath.from_csv(args.spoken_math.read_text(encoding='utf-8')) if args.spoken_math else None
+    spoken = SpokenMath(args.spoken_math.read_text(encoding='utf-8')) if args.spoken_math else None
     stream = typing_stream(crop_words(words, args.start, end), spoken)
     text = document_text(stream)
     args.output.with_suffix('.txt').write_text(text, encoding='utf-8')

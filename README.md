@@ -88,10 +88,10 @@ uv run scripter.py --duration 02:00 --transcript files/first-2min.words.json --f
 
 - "수식시작"이라고 말하면 수식 구간이 시작되고 "수식끝"에서 끝납니다. 그 사이의 말은 단어가 끝날 때마다 AsciiMath로 바뀌고, 지금까지의 수식이 조판되어 화면에 나타납니다. 수식은 가운데 정렬하며, 화면 폭이나 한 페이지보다 크면 줄여서 그립니다.
 - 규칙은 mark-vector의 **공용 수식 말**(`spoken-math.csv`)과 같은 CSV입니다. mark-vector에서 내려받아 `files/spoken-math.csv`에 두면 자동으로 쓰고, 다른 경로는 `--spoken-math 경로`로 지정합니다. 파일이 없으면 이전처럼 글자만 그립니다.
-- 예: "넓이는 수식 시작 적분 밑 영 위 일 엑스 승 이 디엑스 수식끝 입니다" → ∫₀¹ x² dx
+- 예: "넓이는 수식 시작 인테그랄 영에서 일 까지 엑스 승 이 디엑스 는 삼 분의 일 수식끝 입니다" → ∫₀¹ x² dx = 1/3
 - `files/<이름>.txt`에는 수식 구간이 `$$ … $$` 문단으로 들어갑니다. `.words.json`은 인식 결과 그대로라서, 규칙을 고친 뒤 `--transcript`로 다시 렌더링할 수 있습니다.
 
-수식 조판에는 Node.js가 필요합니다(AsciiMath → LaTeX는 asciimath-parser, 그림은 MathJax + resvg, `math_render.mjs`).
+수식 기능에는 Node.js가 필요합니다(`math.mjs`). 말 → AsciiMath 변환은 mark-vector와 같은 [asciimath-markdown](https://github.com/iasandcb/asciimath-markdown)의 `spoken-math`를 그대로 쓰므로, 변환 규칙의 처리 방식이 바뀌면 그 패키지 버전만 올리면 됩니다(`npm update asciimath-markdown`). 그림은 asciimath-parser(LaTeX) → MathJax(SVG) → resvg(PNG)로 만듭니다.
 
 ```sh
 brew install node
@@ -99,7 +99,7 @@ npm install   # scripter 폴더에서 한 번
 uv run scripter.py --spoken-math files/spoken-math.csv
 ```
 
-규칙에 없는 한글(예: "삼 분의 일"의 "분의")은 수식 글꼴에 한글이 없어 수식 안에서 보이지 않습니다. 자주 쓰는 말은 규칙에 추가하세요.
+규칙에 없는 한글은 수식 글꼴에 한글이 없어 수식 안에서 보이지 않습니다. 자주 쓰는 말은 규칙에 추가하세요. 분수("삼 분의 일")처럼 한국어와 AsciiMath의 순서가 다른 말은 규칙의 `{1}`·`{2}`로 처리합니다(asciimath-markdown README 참고).
 
 ## 유튜브 업로드 자료 생성
 
