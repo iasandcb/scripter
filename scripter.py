@@ -17,6 +17,8 @@ from dotenv import load_dotenv
 
 
 BACKGROUND = '#111827'
+SPOKEN_MATH_URL = 'https://markvector.fly.dev/api/public/spoken-math'
+SPOKEN_MATH_CACHE = Path('files/spoken-math.csv')
 TEXT_COLOR = '#f9fafb'
 
 
@@ -179,6 +181,25 @@ def node_math(request):
     result = subprocess.run(['node', str(script)], cwd=script.parent, check=True, capture_output=True,
                             input=json.dumps(request).encode())
     return json.loads(result.stdout)
+
+
+def fetch_spoken_math(url, cache):
+    """The current spoken-math rules from mark-vector, saved to `cache` so
+    the run is reproducible and works offline next time. Returns the path
+    to use - `cache` whether or not this fetch worked, None if there's none."""
+    try:
+        with urlopen(Request(url, headers={'Accept': 'application/json'}), timeout=10) as response:
+            content = json.load(response)['content']
+        cache.parent.mkdir(parents=True, exist_ok=True)
+        cache.write_text(content, encoding='utf-8')
+        print(f'수식 말 규칙을 받았습니다: {url}', flush=True)
+    except (URLError, TimeoutError, OSError, ValueError, KeyError, TypeError) as error:
+        if cache.is_file():
+            print(f'수식 말 규칙을 받지 못해 저장된 {cache}를 씁니다 ({error}).', flush=True)
+        else:
+            print(f'수식 말 규칙을 받지 못했고 저장된 파일도 없어 수식 없이 진행합니다 ({error}).', flush=True)
+            return None
+    return cache
 
 
 class SpokenMath:
@@ -406,8 +427,11 @@ def main():
     parser.add_argument('--font-size', type=int, default=80, help='글꼴 크기(px), 기본 80')
     parser.add_argument('--margin', type=int, default=120)
     parser.add_argument('--lines', type=int, default=7)
-    parser.add_argument('--spoken-math', type=Path, help='수식 말 규칙 CSV (기본 files/spoken-math.csv가 있으면 사용). '
+    parser.add_argument('--spoken-math', type=Path, help='이 수식 말 규칙 CSV만 사용 (mark-vector에서 받지 않음). '
                         '"수식시작" ... "수식끝" 구간을 조판된 수식으로 표시')
+    parser.add_argument('--spoken-math-url', default=SPOKEN_MATH_URL,
+                        help=f'수식 말 규칙을 받을 주소 (기본 {SPOKEN_MATH_URL}, 받은 규칙은 {SPOKEN_MATH_CACHE}에 저장). '
+                        '빈 값이면 받지 않고 저장된 파일만 사용')
     args = parser.parse_args()
     if args.audio is not None and args.input is not None:
         parser.error('위치 인자와 --input 중 하나로만 입력 파일을 지정하세요.')
@@ -423,10 +447,13 @@ def main():
             parser.error(f'{tool}가 필요합니다.')
     if not args.audio.is_file() or not args.font.is_file():
         parser.error('음성 파일과 한글 폰트 경로를 확인하세요.')
-    if args.spoken_math is None and Path('files/spoken-math.csv').is_file():
-        args.spoken_math = Path('files/spoken-math.csv')
     if args.spoken_math is not None and not args.spoken_math.is_file():
         parser.error(f'수식 말 규칙 파일이 없습니다: {args.spoken_math}')
+    if args.spoken_math is None:
+        if args.spoken_math_url:
+            args.spoken_math = fetch_spoken_math(args.spoken_math_url, SPOKEN_MATH_CACHE)
+        elif SPOKEN_MATH_CACHE.is_file():
+            args.spoken_math = SPOKEN_MATH_CACHE
     if min(args.width, args.height, args.fps, args.lines, args.font_size) <= 0 or args.margin < 0 or args.width % 2 or args.height % 2:
         parser.error('해상도는 양의 짝수, fps/줄 수/글꼴 크기는 양수여야 합니다.')
     total = probe(args.audio)

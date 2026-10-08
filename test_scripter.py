@@ -7,7 +7,7 @@ import json
 import tempfile
 from pathlib import Path
 from unittest.mock import patch
-from scripter import generate_youtube, main
+from scripter import generate_youtube, main, fetch_spoken_math
 
 
 class DotenvTests(unittest.TestCase):
@@ -72,6 +72,7 @@ class YoutubeTests(unittest.TestCase):
                  patch('scripter.shutil.which', return_value='tool'), \
                  patch('scripter.Path.is_file', lambda path: path.name != 'spoken-math.csv'), \
                  patch('scripter.Path.mkdir'), patch('scripter.Path.write_text'), \
+                 patch('scripter.fetch_spoken_math', return_value=None), \
                  patch('scripter.probe', return_value=10), patch('scripter.render') as render, \
                  patch('scripter.generate_youtube') as youtube:
                 main()
@@ -109,6 +110,25 @@ class RangeTests(unittest.TestCase):
 class FixedFont:
     def getlength(self, text):
         return len(text) * 10
+
+class FetchSpokenMathTests(unittest.TestCase):
+    def test_saves_fetched_rules(self):
+        body = io.BytesIO(json.dumps({'content': '엑스, x\n'}).encode())
+        with tempfile.TemporaryDirectory() as folder, patch('scripter.urlopen', return_value=body), patch('sys.stdout'):
+            cache = Path(folder) / 'files' / 'spoken-math.csv'
+            self.assertEqual(fetch_spoken_math('https://example.invalid', cache), cache)
+            self.assertEqual(cache.read_text(encoding='utf-8'), '엑스, x\n')
+
+    def test_falls_back_to_saved_rules_offline(self):
+        from urllib.error import URLError
+        with tempfile.TemporaryDirectory() as folder, patch('scripter.urlopen', side_effect=URLError('offline')), \
+             patch('sys.stdout'):
+            cache = Path(folder) / 'spoken-math.csv'
+            self.assertIsNone(fetch_spoken_math('https://example.invalid', cache))
+            cache.write_text('엑스, x\n', encoding='utf-8')
+            self.assertEqual(fetch_spoken_math('https://example.invalid', cache), cache)
+            self.assertEqual(cache.read_text(encoding='utf-8'), '엑스, x\n')
+
 
 class TimelineTests(unittest.TestCase):
     def test_character_timing(self):
