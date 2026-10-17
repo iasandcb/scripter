@@ -14,9 +14,17 @@ uv run scripter.py --duration 20 -o files/preview.mp4
 uv run scripter.py
 ```
 
-첫 실행 시 Hugging Face에서 모델을 `.models/`에 다운로드합니다. 기본 실행의 음성 인식은 로컬에서 처리합니다. `--youtube`는 전사문과 썸네일 생성 지시를 OpenAI API로 전송합니다. CPU에서 약 48분 음성의 인식과 렌더링은 시간이 걸릴 수 있습니다. `--model medium`은 더 큰 모델, `--model tiny`는 빠른 시험용 모델입니다.
+첫 실행 시 Hugging Face에서 모델을 `.models/`에 다운로드합니다. 기본 실행의 음성 인식은 로컬에서 처리합니다. `--youtube`는 전사문과 썸네일 생성 지시를 OpenAI API로 전송합니다.
 
-음성 인식과 렌더링 단계마다 `렌더링: 30.0 / 120.0초 (25.0%)`처럼 처리한 음성/영상 길이와 진행률을 출력합니다. 구간 지정 시 선택한 구간 길이를 기준으로 계산합니다. 인식은 인식된 구간마다, 렌더링은 영상 10초마다 출력하며 각 단계가 끝나면 100%를 표시합니다. 이 진행률은 처리 분량 기준이며, 실제 소요 시간의 비율은 아닙니다.
+### 음성 인식 엔진
+
+- Apple Silicon Mac에서는 [mlx-whisper](https://github.com/ml-explore/mlx-examples/tree/main/whisper)로 GPU에서 `large-v3` 모델을 씁니다(약 3GB, 처음 한 번 다운로드). 약 44분 음성이 5분 안팎에 인식됩니다.
+- 그 밖의 컴퓨터에서는 [faster-whisper](https://github.com/SYSTRAN/faster-whisper)로 CPU에서 `small` 모델을 씁니다.
+- `--engine mlx` 또는 `--engine faster-whisper`로 엔진을, `--model`로 모델(`tiny`, `small`, `medium`, `large-v3`, `large-v3-turbo` 등)을 고를 수 있습니다. 실행 시 `음성 인식: mlx large-v3`처럼 쓰는 엔진과 모델을 출력합니다.
+- 같은 large-v3라도 faster-whisper(CPU)가 조금 더 정확하지만 녹음 길이의 1.5배 이상 걸립니다(`--engine faster-whisper --model large-v3`). `large-v3-turbo`는 빠르지만 문장부호가 없어 문장마다 줄넘김이 되지 않고, 끝에 없는 말을 지어내는 경우가 있어 권하지 않습니다.
+- mlx 엔진은 VAD(무음 걸러내기)가 없어서, 쉬는 구간에서 없는 말을 지어내지 않도록 이전 문장에 기대지 않고(`condition_on_previous_text=False`) 긴 무음 속 단어를 건너뛰게(`hallucination_silence_threshold`) 설정했습니다.
+
+음성 인식과 렌더링 단계마다 `렌더링: 30.0 / 120.0초 (25.0%)`처럼 처리한 음성/영상 길이와 진행률을 출력합니다. 구간 지정 시 선택한 구간 길이를 기준으로 계산합니다. faster-whisper의 인식은 인식된 구간마다(mlx는 진행 막대로), 렌더링은 영상 10초마다 출력하며 각 단계가 끝나면 100%를 표시합니다. 이 진행률은 처리 분량 기준이며, 실제 소요 시간의 비율은 아닙니다.
 
 ## 결과와 조정
 
@@ -32,6 +40,25 @@ uv run scripter.py recording.m4a -o files/video.mp4
 ```
 
 위치 인자와 `--input`은 함께 지정할 수 없습니다.
+
+### 전사문만 먼저 만들고 영상은 나중에
+
+`--no-video`는 음성 인식과 전사문(`.words.json`, `.txt`)까지만 만들고 영상은 만들지 않습니다. `.txt`를 확인하고 고친 뒤 같은 입력·출력과 구간으로 `--resume`을 실행하면, 음성 인식 없이 고친 `.txt`의 내용으로 영상을 만듭니다. 유튜브 자료도 필요하면 `--resume`에 `--youtube`를 함께 지정하세요. 고친 `.txt`가 그대로 제목·설명 생성에 쓰입니다. `--no-video`는 `--youtube`와 함께 쓸 수 없습니다.
+
+```sh
+uv run scripter.py -i files/20261007.m4a --no-video
+# files/20261007.txt 확인 후 수정 (잘못 인식된 말, 수식 등)
+uv run scripter.py -i files/20261007.m4a --resume --youtube
+```
+
+`.txt`에는 시각이 없으므로, 언제 나타날지는 `.words.json`의 시각을 씁니다. `.txt`와 원래 인식 결과를 단어 단위로 맞춰 보고, 바뀌지 않은 단어는 원래 시각에, 고친 단어는 그 자리에 있던(바꾼) 단어들이 발화된 구간에 나눠 표시하고, 새로 추가한 단어는 바로 뒤 단어와 함께 나타납니다. 그래서 고친 단어도 대략 말한 때에 나타납니다.
+
+- **수식 고치기**: `$$` 와 `$$` 사이의 AsciiMath를 바로 고치면 됩니다(예: `F(x) = int_0^t f(x) dx`). 고친 수식은 원래 수식 구간 동안 공백 단위로 조금씩 나타납니다. 고치지 않은 수식은 원래대로 나타납니다.
+- **수식으로 바꾸기**: "수식시작"이 인식되지 않아 글자로 나온 부분은 그 말을 지우고 그 자리에 `$$ … $$` 문단을 넣으면, 지운 말의 발화 구간에 수식이 나타납니다.
+- 편집하기 쉽도록 `.txt`는 문장(`.`, `?`, `!` 뒤)마다 줄을 바꿉니다. 이 줄바꿈은 편집용이라 영상에서는 공백으로 이어지며, 직접 줄을 바꾸거나 합쳐도 영상은 같습니다. `$$` 앞뒤의 빈 줄도 무시합니다.
+- `--resume`은 `.txt`를 덮어쓰지 않습니다. `.txt`가 없으면 `.words.json`만으로 만듭니다.
+
+`--resume`은 출력 경로(`-o`, 기본 `files/<입력 이름>.mp4`) 옆의 `.words.json`과 `.txt`를 읽으므로 `--transcript`와 함께 쓸 수 없습니다. `.txt`가 내용을 정하므로 `--resume` 전에는 `.words.json`의 글자를 고쳐도 반영되지 않습니다(시각 수정은 반영됩니다).
 
 ### 생성 구간 지정
 
@@ -127,6 +154,21 @@ uv run scripter.py -i files/20261007.m4a --duration 02:00 --youtube
 - `files/20261007.youtube.json`: 제목, 설명, 썸네일 생성 지시.
 - `files/20261007.thumbnail-prompt.txt`: 썸네일 생성 지시.
 - `files/20261007.thumbnail.png`: 1280×720 썸네일. 생성 이미지를 중앙 기준 16:9로 잘라 저장합니다.
+
+설명 끝에는 유튜브 **챕터**(주요 지점으로 바로 가는 시각 목록)가 붙습니다. 전사문을 문장마다 실제 영상 시각을 붙여 보내고(`[02:15] …`), 모델이 고른 주제 전환 지점을 코드에서 유튜브 규칙(첫 시각 `00:00`, 오름차순, 구간 10초 이상, 3개 이상)대로 검사해 통과한 것만 넣습니다. 3개가 안 되면 챕터 없이 저장합니다. `--start`로 구간을 지정해도 시각은 영상 기준(0초부터)이고, `--resume --youtube`에서는 고친 `.txt` 기준입니다. 챕터는 `.youtube.json`의 `chapters`에도 저장됩니다.
+
+챕터만 다시 만들려면 `--chapters`를 쓰세요. 출력 경로의 `.words.json`(시각)과 `.txt`(내용, 고쳐도 됨)로 챕터만 새로 받아 `.youtube.txt` 설명 끝과 `.youtube.json`의 `chapters`를 바꿉니다. 제목·설명 본문·썸네일·영상은 그대로이고 텍스트 API 요금만 발생합니다. `--youtube`로 만든 `.youtube.json`이 있어야 하며, 유효한 챕터를 만들지 못하면 기존 파일을 바꾸지 않습니다.
+
+```sh
+uv run scripter.py --chapters
+```
+
+썸네일이 마음에 들지 않으면 `.thumbnail-prompt.txt`를 고친 뒤 `--thumbnail`로 썸네일만 다시 만드세요. 음성 인식, 영상, 제목·설명은 다시 만들지 않으며, 고친 지시는 `.youtube.json`의 `thumbnail_prompt`에도 반영됩니다. 이미지 API 요금만 발생하고 `.thumbnail.png`는 덮어씁니다.
+
+```sh
+uv run scripter.py --thumbnail
+uv run scripter.py -i files/20261007.m4a --thumbnail --youtube-image-model gpt-image-1
+```
 
 선택한 구간의 전사문 전체에서 자료를 생성합니다. 썸네일 요청에 실패해도 영상·전사문·제목·설명은 보존합니다. 생성된 내용은 확인 후 사용하세요. 실제 유튜브 업로드와 계정 인증은 아직 포함하지 않습니다.
 
