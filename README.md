@@ -21,6 +21,7 @@ uv run scripter.py
 - Apple Silicon Mac에서는 [mlx-whisper](https://github.com/ml-explore/mlx-examples/tree/main/whisper)로 GPU에서 `large-v3` 모델을 씁니다(약 3GB, 처음 한 번 다운로드). 약 44분 음성이 5분 안팎에 인식됩니다.
 - 그 밖의 컴퓨터에서는 [faster-whisper](https://github.com/SYSTRAN/faster-whisper)로 CPU에서 `small` 모델을 씁니다.
 - `--engine mlx` 또는 `--engine faster-whisper`로 엔진을, `--model`로 모델(`tiny`, `small`, `medium`, `large-v3`, `large-v3-turbo` 등)을 고를 수 있습니다. 실행 시 `음성 인식: mlx large-v3`처럼 쓰는 엔진과 모델을 출력합니다.
+- `--engine modal`은 [Modal](https://modal.com)의 L4 GPU에서 faster-whisper `large-v3`(VAD, `beam_size=5`)를 돌립니다. 처음 한 번 `uv run modal setup`으로 로그인하세요. 첫 실행에는 이미지 빌드와 모델 다운로드로 몇 분 더 걸리고, 모델은 Modal 볼륨 `scripter-whisper-models`에 저장됩니다. 음성이 16kHz 모노 FLAC으로 Modal 서버에 전송되며, 사용한 만큼 Modal 요금이 부과됩니다. 55분 녹음 기준으로 약 7분이 걸려 mlx와 속도가 비슷했고, 정확도는 mlx와 비슷하거나 낮을 수 있습니다(웃음 구간에서 `ㅎ`이 반복되거나 글자가 깨지는 경우가 있었습니다). Apple Silicon이 없는 환경에서 쓰는 선택지로 보세요.
 - 같은 large-v3라도 faster-whisper(CPU)가 조금 더 정확하지만 녹음 길이의 1.5배 이상 걸립니다(`--engine faster-whisper --model large-v3`). `large-v3-turbo`는 빠르지만 문장부호가 없어 문장마다 줄넘김이 되지 않고, 끝에 없는 말을 지어내는 경우가 있어 권하지 않습니다.
 - mlx 엔진은 VAD(무음 걸러내기)가 없어서, 쉬는 구간에서 없는 말을 지어내지 않도록 이전 문장에 기대지 않고(`condition_on_previous_text=False`) 긴 무음 속 단어를 건너뛰게(`hallucination_silence_threshold`) 설정했습니다.
 
@@ -145,7 +146,7 @@ uv run scripter.py --youtube
 uv run scripter.py -i files/20261007.m4a --duration 02:00 --youtube
 ```
 
-기본적으로 제목·설명은 `gpt-4.1-mini`, 썸네일은 `gpt-image-1`로 생성합니다. `--youtube-model`, `--youtube-image-model`로 각각 변경할 수 있습니다. 이미지 모델은 GPT Image API의 `1536x1024` PNG 생성을 지원해야 합니다.
+기본적으로 제목·설명은 `gpt-6-luna`, 썸네일은 `gpt-image-2.5-flare`로 생성합니다. `--youtube-model`, `--youtube-image-model`로 각각 변경할 수 있습니다. 이미지 모델은 GPT Image API의 `1536x1024` PNG 생성을 지원해야 합니다.
 
 예를 들어 입력이 `files/20261007.m4a`이면 다음 결과가 저장됩니다.
 
@@ -167,7 +168,7 @@ uv run scripter.py --chapters
 
 ```sh
 uv run scripter.py --thumbnail
-uv run scripter.py -i files/20261007.m4a --thumbnail --youtube-image-model gpt-image-1
+uv run scripter.py -i files/20261007.m4a --thumbnail --youtube-image-model gpt-image-2.5-flare
 ```
 
 선택한 구간의 전사문 전체에서 자료를 생성합니다. 썸네일 요청에 실패해도 영상·전사문·제목·설명은 보존합니다. 생성된 내용은 확인 후 사용하세요. 실제 유튜브 업로드와 계정 인증은 아직 포함하지 않습니다.
