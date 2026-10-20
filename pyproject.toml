@@ -11,6 +11,7 @@ dependencies = [
     # PyAV 19 removed metadata_errors, which faster-whisper 1.2 uses.
     "av>=11,<19",
     "mlx-whisper>=0.4,<1 ; platform_machine == 'arm64' and sys_platform == 'darwin'",
+    "modal>=1.6.2",
 ]
 
 [tool.uv]

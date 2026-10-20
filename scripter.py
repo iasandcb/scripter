@@ -344,6 +344,23 @@ def transcribe(audio, model, language, cache, duration):
     return words
 
 
+def transcribe_modal(audio, model, language, cache, duration):
+    """faster-whisper on a Modal GPU: the audio is sent as 16 kHz mono FLAC
+    and the recognized words come back segment by segment."""
+    import modal
+    from modal_whisper import app, transcribe as remote
+    flac = subprocess.run(['ffmpeg', '-hide_banner', '-loglevel', 'error', '-i', str(audio), '-ar', '16000', '-ac', '1',
+                           '-f', 'flac', 'pipe:1'], check=True, capture_output=True).stdout
+    words = []
+    print(progress('인식', 0, duration), flush=True)
+    with modal.enable_output(), app.run():
+        for segment in remote.remote_gen(flac, model, language):
+            print(f'{progress("인식", segment["end"], duration)} / {segment["text"]}', flush=True)
+            words.extend(segment['words'])
+    print(progress('인식 완료', duration, duration), flush=True)
+    return words
+
+
 def node_math(request):
     """One request to math.mjs (Node): spoken math conversion through
     asciimath-markdown - the converter mark-vector's dictation uses - and
@@ -691,12 +708,12 @@ def main():
     parser.add_argument('-i', '--input', type=Path, help='입력 음성 파일 경로')
     parser.add_argument('-o', '--output', type=Path, help='출력 경로 (기본 files/<입력 이름>.mp4)')
     parser.add_argument('--youtube', action='store_true', help='전사문으로 유튜브 제목·설명·썸네일 생성 (OpenAI API)')
-    parser.add_argument('--youtube-model', default='gpt-4.1-mini', help='제목·설명 생성 모델')
-    parser.add_argument('--youtube-image-model', default='gpt-image-1', help='썸네일 생성 모델')
-    parser.add_argument('--engine', choices=('auto', 'mlx', 'faster-whisper'), default='auto',
-                        help='음성 인식 엔진: mlx(Apple Silicon GPU), faster-whisper(CPU). auto는 가능하면 mlx')
+    parser.add_argument('--youtube-model', default='gpt-6-luna', help='제목·설명 생성 모델')
+    parser.add_argument('--youtube-image-model', default='gpt-image-2.5-flare', help='썸네일 생성 모델')
+    parser.add_argument('--engine', choices=('auto', 'mlx', 'faster-whisper', 'modal'), default='auto',
+                        help='음성 인식 엔진: mlx(Apple Silicon GPU), faster-whisper(CPU), modal(Modal GPU의 faster-whisper). auto는 가능하면 mlx')
     parser.add_argument('--model', help='tiny/base/small/medium/large-v3/large-v3-turbo '
-                        '(기본: mlx는 large-v3, faster-whisper는 small)')
+                        '(기본: mlx와 modal은 large-v3, faster-whisper는 small)')
     parser.add_argument('--language', default='ko')
     parser.add_argument('--start', type=parse_time, default=0, help='시작 시각: 초 / MM:SS / HH:MM:SS (기본 0)')
     interval = parser.add_mutually_exclusive_group()
@@ -795,9 +812,14 @@ def main():
         if args.start > 0 or end < total:
             subprocess.run(['ffmpeg', '-hide_banner', '-loglevel', 'error', '-y', '-ss', str(args.start), '-i', str(source), '-t', str(duration), '-ar', '16000', '-ac', '1', str(clipped)], check=True)
             source = clipped
-        engine = transcribe_mlx if args.engine == 'mlx' or (args.engine == 'auto' and mlx_available()) else transcribe
-        model = args.model or ('large-v3' if engine is transcribe_mlx else 'small')
-        print(f'음성 인식: {"mlx" if engine is transcribe_mlx else "faster-whisper"} {model}', flush=True)
+        if args.engine == 'modal':
+            engine, name = transcribe_modal, 'modal'
+        elif args.engine == 'mlx' or (args.engine == 'auto' and mlx_available()):
+            engine, name = transcribe_mlx, 'mlx'
+        else:
+            engine, name = transcribe, 'faster-whisper'
+        model = args.model or ('small' if engine is transcribe else 'large-v3')
+        print(f'음성 인식: {name} {model}', flush=True)
         words = engine(source, model, args.language, Path('.models'), duration)
         words = [dict(word, start=word['start'] + args.start, end=word['end'] + args.start) for word in words]
     words = [word for word in words if float(word['end']) > args.start and float(word['start']) < end]
