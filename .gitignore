@@ -4,4 +4,7 @@ files/
 __pycache__/
 .DS_Store
 .env
+.youtube-token.json
+client_secret*.json
+*.youtube-upload.json
 node_modules/

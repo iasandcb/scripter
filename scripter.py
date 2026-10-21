@@ -15,6 +15,8 @@ from typing import NamedTuple
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 from dotenv import load_dotenv
+import worker
+import youtube_upload
 
 
 BACKGROUND = '#111827'
@@ -1006,13 +1008,56 @@ def commit_correction(original, corrected, ratio, threshold, force, raw_path, do
     return kept
 
 
-def main():
+def _metadata_saved(error, output):
+    return '제목·설명은 저장되었습니다' in str(error) and output.with_suffix('.youtube.json').is_file()
+
+
+def run_service(args, parser):
+    """YouTube auth, a one-file upload, or the queue worker. No local audio required."""
+    if args.youtube_auth:
+        youtube_upload.authorize_interactive(client_secret=args.client_secret, token_file=args.token_file)
+        return
+    if args.upload:
+        output = worker.resolve_upload_target(args, parser)
+        youtube_upload.upload_command(output, privacy=args.privacy, client_secret=args.client_secret,
+                                      token_file=args.token_file)
+        return
+    worker.serve(args)
+
+
+def main(argv=None):
     load_dotenv(Path(__file__).resolve().parent / '.env', override=False)
     parser = argparse.ArgumentParser(description='음성 → 글자별 타이핑 영상 (로컬 Whisper)')
     parser.add_argument('audio', nargs='?', type=Path, help='입력 음성 파일 (기본 files/audio.m4a 또는 files 내 유일한 음성)')
     parser.add_argument('-i', '--input', type=Path, help='입력 음성 파일 경로')
     parser.add_argument('-o', '--output', type=Path, help='출력 경로 (기본 files/<입력 이름>.mp4)')
     parser.add_argument('--youtube', action='store_true', help='전사문으로 유튜브 제목·설명·썸네일 생성 (OpenAI API)')
+    parser.add_argument('--allow-missing-thumbnail', action='store_true',
+                        help='--youtube에서 썸네일 생성이 실패해도 영상과 제목·설명은 유지하고 계속')
+    parser.add_argument('--upload', action='store_true',
+                        help='이미 만든 .mp4와 .youtube.json을 유튜브에 업로드')
+    parser.add_argument('--youtube-auth', action='store_true',
+                        help='유튜브 OAuth 동의(브라우저) 후 갱신 토큰을 로컬에 저장')
+    parser.add_argument('--privacy', choices=('private', 'unlisted', 'public'), default='private',
+                        help='--upload 공개 범위 (기본 private. 검증되지 않은 API 프로젝트는 private만 업로드됨)')
+    parser.add_argument('--worker', action='store_true',
+                        help='mark-vector 작업 큐를 폴링해 전사·교정·영상·유튜브 비공개 업로드까지 처리')
+    parser.add_argument('--once', action='store_true',
+                        help='--worker와 함께: 작업을 하나만 처리하거나, 없으면 바로 종료')
+    parser.add_argument('--poll-seconds', type=float, default=None,
+                        help='큐가 비었을 때 다시 확인하기까지 대기 초 (기본 60, 환경 변수 WORKER_POLL_SECONDS)')
+    parser.add_argument('--lease-seconds', type=int, default=3600,
+                        help='작업 임대 초. 진행 보고마다 같은 시간으로 갱신 (기본 3600, 30..86400)')
+    parser.add_argument('--progress-seconds', type=float, default=None,
+                        help='임대 갱신 간격 초 (기본 120, 환경 변수 WORKER_PROGRESS_SECONDS)')
+    parser.add_argument('--worker-id', default=None, help='큐에 알릴 워커 이름 (기본 scripter-<호스트>, WORKER_ID)')
+    parser.add_argument('--worker-url', default=None,
+                        help='큐 주소 (기본 https://markvector.fly.dev, WORKER_BASE_URL)')
+    parser.add_argument('--worker-dir', type=Path, default=None, help='작업 파일 위치 (기본 files/worker)')
+    parser.add_argument('--client-secret', type=Path, default=None,
+                        help='Google OAuth 데스크톱 클라이언트 JSON (기본 client_secret.json, YOUTUBE_CLIENT_SECRET)')
+    parser.add_argument('--token-file', type=Path, default=None,
+                        help='유튜브 갱신 토큰 파일 (기본 .youtube-token.json, YOUTUBE_TOKEN_FILE)')
     parser.add_argument('--youtube-model', default=TEXT_MODEL, help='제목·설명 생성 모델')
     parser.add_argument('--youtube-image-model', default='gpt-image-2.5-flare', help='썸네일 생성 모델')
     parser.add_argument('--glossary', default=None,
@@ -1055,7 +1100,11 @@ def main():
     parser.add_argument('--spoken-math-url', default=SPOKEN_MATH_URL,
                         help=f'수식 말 규칙을 받을 주소 (기본 {SPOKEN_MATH_URL}, 받은 규칙은 {SPOKEN_MATH_CACHE}에 저장). '
                         '빈 값이면 받지 않고 저장된 파일만 사용')
-    args = parser.parse_args()
+    args = parser.parse_args(argv)
+    worker.validate_worker_args(args, parser)
+    if args.youtube_auth or args.upload or args.worker:
+        run_service(args, parser)
+        return
     if args.audio is not None and args.input is not None:
         parser.error('위치 인자와 --input 중 하나로만 입력 파일을 지정하세요.')
     try:
@@ -1202,8 +1251,13 @@ def main():
         return
     render(args.audio, args.output, stream, duration, args)
     if args.youtube:
-        generate_youtube(text, args.output, args.youtube_model, args.youtube_image_model,
-                         timed=timed_text(stream), duration=duration)
+        try:
+            generate_youtube(text, args.output, args.youtube_model, args.youtube_image_model,
+                             timed=timed_text(stream), duration=duration)
+        except RuntimeError as error:
+            if not (args.allow_missing_thumbnail and _metadata_saved(error, args.output)):
+                raise
+            print(f'썸네일을 만들지 못했습니다. 영상과 제목·설명으로 계속합니다: {error}', flush=True)
     print(f'완료: {args.output.resolve()}')
 
 
