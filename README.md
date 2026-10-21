@@ -223,9 +223,83 @@ uv run scripter.py --thumbnail
 uv run scripter.py -i files/20261007.m4a --thumbnail --youtube-image-model gpt-image-2.5-flare
 ```
 
-선택한 구간의 전사문 전체에서 자료를 생성합니다. 썸네일 요청에 실패해도 영상·전사문·제목·설명은 보존합니다. 생성된 내용은 확인 후 사용하세요. 실제 유튜브 업로드와 계정 인증은 아직 포함하지 않습니다.
+선택한 구간의 전사문 전체에서 자료를 생성합니다. 썸네일 요청에 실패해도 영상·전사문·제목·설명은 보존합니다. 생성된 내용은 확인 후 사용하세요. 만든 영상을 올리는 방법은 아래 "유튜브에 올리기"를 보세요. `--allow-missing-thumbnail`을 붙이면 썸네일 생성만 실패해도 그대로 끝납니다(워커가 이 옵션을 켭니다).
 
 API 구현 참고: [Structured Outputs](https://developers.openai.com/api/docs/guides/structured-outputs), [Image generation API](https://developers.openai.com/api/reference/resources/images/methods/generate).
+
+## 유튜브에 올리기
+
+YouTube Data API v3로 영상을 올립니다. `videos.insert` 재개 업로드(resumable)와 `thumbnails.set`을 쓰고, 제목·설명·챕터는 `.youtube.json`에서 읽습니다. 언어는 한국어(`defaultLanguage`, `defaultAudioLanguage`)입니다. 카테고리 기본값은 Education(`27`)이고 `.env`의 `YOUTUBE_CATEGORY_ID`로 바꿉니다. 아동용 아님(`selfDeclaredMadeForKids: false`)으로 선언합니다. 아동용 영상이면 이 업로드를 쓰지 마세요.
+
+공개 범위 기본값은 **`private`**입니다. 검증되지 않은 API 프로젝트는 비공개만 올릴 수 있습니다. 스튜디오에서 확인한 뒤 직접 공개하세요. `--upload`만 `--privacy unlisted` 또는 `public`을 받을 수 있고, 워커는 `private`만 허용합니다.
+
+이미 렌더한 영상을 올리려면 `.mp4`, `.youtube.json`이 있어야 합니다. `.thumbnail.png`가 있으면 함께 올립니다. 채널이 인증되지 않아 썸네일이 거절되어도 영상 업로드는 성공으로 둡니다.
+
+```sh
+uv run scripter.py --upload -o files/20261007.mp4
+uv run scripter.py --upload -o files/20261007.mp4 --privacy private
+```
+
+### 한 번만 하는 설정
+
+1. [Google Cloud 콘솔](https://console.cloud.google.com/)에서 프로젝트를 만듭니다.
+2. API 및 서비스 → 라이브러리에서 **YouTube Data API v3**를 사용으로 바꿉니다.
+3. OAuth 동의 화면을 외부(External)로 만듭니다. 앱 이름, 사용자 지원 이메일, 개발자 연락처를 채웁니다. 범위에 `https://www.googleapis.com/auth/youtube.upload`와 `https://www.googleapis.com/auth/youtube.force-ssl`을 넣습니다. 게시 전 테스트 모드에서는 **테스트 사용자**에 채널의 Google 계정을 추가해야 그 계정으로 동의할 수 있습니다.
+4. 사용자 인증 정보 → OAuth 클라이언트 ID → 애플리케이션 유형 **데스크톱 앱**. JSON을 받아 저장소 루트의 `client_secret.json`으로 둡니다(이름은 `client_secret`으로 시작하고 `.json`으로 끝나면 됩니다). 이 파일은 Git에 올라가지 않습니다.
+5. `.env.example`을 `.env`로 복사하고 `OPENAI_API_KEY`를 넣습니다. 워커를 쓸 때는 mark-vector README의 "YouTube 영상 작업 큐"에서 발급한 토큰을 `WORKER_TOKEN`에 넣습니다. 요청 헤더는 `Authorization: Bearer <토큰>`입니다.
+6. 터미널에서 한 번 동의합니다. 브라우저가 열리고, 갱신 토큰은 `.youtube-token.json`에 저장됩니다(권한 `600`, Git 제외).
+
+```sh
+cp .env.example .env
+uv run scripter.py --youtube-auth
+```
+
+동의 화면이 안 열리면 터미널에 출력된 주소를 브라우저에 붙여 넣으세요. 토큰을 버리거나 범위를 바꾸면 `.youtube-token.json`을 지우고 `--youtube-auth`를 다시 실행합니다. LaunchAgent는 브라우저를 띄우지 않으므로, 워커를 등록하기 **전에** 이 단계를 끝내야 합니다.
+
+기본 할당량은 하루 10,000 유닛이고 `videos.insert`는 1,600 유닛입니다. 기본 할당량으로는 하루에 영상을 여섯 개 남짓 올릴 수 있습니다.
+
+## 마크벡터 작업 큐
+
+mark-vector는 맥을 호출하지 않습니다. 이 맥이 `https://markvector.fly.dev`의 큐를 가져갑니다(다른 주소는 `WORKER_BASE_URL`). 인증은 `WORKER_TOKEN`입니다.
+
+워커는 작업을 하나 빌려(`lease`, 기본 1시간) 음성을 받고, 용어집과 `--correct`, 영상, `--youtube` 자료(제목·설명·챕터·썸네일)를 만든 뒤 비공개로 올립니다. 끝난 뒤 영상 id, 주소, 교정된 전사문(`.txt`)을 큐에 보고합니다. 오래 걸리는 렌더 중에는 약 2분마다 진행을 보내 임대를 갱신합니다. Apple Silicon에서는 평소와 같이 mlx `large-v3`를 씁니다.
+
+대기 중에는 잠자기 방지(caffeinate)를 켜지 않습니다. 작업을 처리하는 동안에만 `caffeinate -i`로 유휴 잠자기를 막습니다. 뚜껑을 닫으면 맥은 그래도 잠듭니다. 잠든 동안에는 큐를 보지 않고, 작업 중이었다면 임대가 끝나 작업이 큐로 돌아갑니다. 깨어난 뒤 같은 작업을 다시 받으면, 이미 올린 영상은 다시 올리지 않고 완료 보고만 재시도합니다. 이 기록은 이 맥의 `files/worker/<작업 id>/state.json`과 `video.youtube-upload.json`에 있습니다. 완료되기 전에 지우면 같은 영상이 한 번 더 올라갈 수 있습니다.
+
+```sh
+# 큐가 비어 있으면 바로 종료, 있으면 하나만 처리
+uv run scripter.py --worker --once
+# 로그인 세션에서 계속 폴링 (기본 60초)
+uv run scripter.py --worker
+```
+
+### 로그인할 때 시작 (launchd)
+
+Docker는 쓰지 않습니다. `macos/com.scripter.worker.plist`가 틀이고, 설치 스크립트가 `uv`와 저장소 절대 경로를 넣어 `~/Library/LaunchAgents/com.scripter.worker.plist`에 복사한 뒤 `launchctl bootstrap` 합니다. 로그인하면 워커가 뜨고, 프로세스가 죽으면 30초 뒤 다시 뜹니다. 표준 출력과 오류는 `~/Library/Logs/scripter-worker.log`에 붙습니다. 토큰은 plist에 넣지 않고, 워커가 저장소의 `.env`를 읽습니다.
+
+```sh
+chmod +x macos/install-worker.sh
+./macos/install-worker.sh
+tail -f ~/Library/Logs/scripter-worker.log
+# 설정을 고친 뒤 다시 띄우기
+launchctl kickstart -k "gui/$(id -u)/com.scripter.worker"
+./macos/install-worker.sh --uninstall
+```
+
+로그아웃하면 LaunchAgent도 멈춥니다. 긴 작업을 넘기려면 로그인된 채로 두세요. `ffmpeg`, `ffprobe`, (수식을 조판하려면) `node`와 `npm install`이 설치 스크립트가 넣는 `PATH`에서 보여야 합니다. Homebrew 경로(`/opt/homebrew/bin`)는 plist에 포함됩니다.
+
+### 문제 해결
+
+- **401 Not authenticated**: `.env`의 `WORKER_TOKEN`이 비었거나 거절되었습니다. 고친 뒤에는 `launchctl kickstart -k`로 프로세스를 다시 띄우세요. 환경 변수로 둔 값이 `.env`보다 우선합니다.
+- **작업을 받지 않고 인증 로그만 나옴**: `--youtube-auth`를 하지 않았거나 `client_secret.json`이 없습니다.
+- **`invalid_grant`**: 갱신 토큰이 취소되었습니다. `.youtube-token.json`을 지우고 `--youtube-auth`를 다시 실행하세요.
+- **업로드 HTTP 403, `accessNotConfigured`**: YouTube Data API v3가 그 프로젝트에서 꺼져 있습니다.
+- **업로드 HTTP 403, 할당량 또는 공개 영상**: 비공개가 아니거나 하루 할당량을 넘겼습니다. 워커는 비공개만 올립니다.
+- **썸네일 HTTP 403**: 채널 전화 인증이 없을 때 흔합니다. 영상은 비공개로 올라가 있고 작업은 완료로 보고됩니다. 스튜디오에서 썸네일을 나중에 넣을 수 있습니다.
+- **임대가 끝났습니다**: 잠자기, 뚜껑을 닫음, 또는 진행 보고가 한 시간 넘게 실패한 경우입니다. 작업은 다시 큐에 들어갑니다. 같은 작업 id로 다시 오면 받아 둔 음성과, 끝나 있던 영상 생성, 이미 올린 영상 id를 재사용합니다.
+- **완료 보고만 실패**: 영상 id는 `state.json`에 있습니다. 워커는 업로드를 반복하지 않고 완료 보고만 다시 합니다. 같은 오류가 여덟 번 쌓이면 `complete_blocked`로 멈추고 로그에 영상 주소를 남깁니다.
+- **수식이 글자로 남음**: `brew install node` 후 저장소에서 `npm install`.
+- **워커가 조용함**: `launchctl print "gui/$(id -u)/com.scripter.worker"`와 로그 파일을 확인하세요. 맥이 잠들어 있으면 큐를 보지 않습니다.
 
 ## 개발 및 검증
 
