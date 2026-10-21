@@ -27,6 +27,23 @@ uv run scripter.py
 
 음성 인식과 렌더링 단계마다 `렌더링: 30.0 / 120.0초 (25.0%)`처럼 처리한 음성/영상 길이와 진행률을 출력합니다. 구간 지정 시 선택한 구간 길이를 기준으로 계산합니다. faster-whisper의 인식은 인식된 구간마다(mlx는 진행 막대로), 렌더링은 영상 10초마다 출력하며 각 단계가 끝나면 100%를 표시합니다. 이 진행률은 처리 분량 기준이며, 실제 소요 시간의 비율은 아닙니다.
 
+### 용어집
+
+자주 나오는 이름과 용어는 `files/glossary.txt`에 한 줄에 하나씩 적습니다. `#`으로 시작하는 줄은 주석입니다. 파일이 있으면 음성 인식 힌트로 쓰고, `--correct`를 쓸 때는 교정 요청의 맥락으로도 넘깁니다. 다른 파일은 `--glossary 경로`, 용어집을 끄려면 `--glossary ''`.
+
+```
+# files/glossary.txt
+마크벡터
+수식시작
+수식끝
+AsciiMath
+```
+
+- mlx는 이 목록을 `initial_prompt`로 넘깁니다. `condition_on_previous_text=False`와 `hallucination_silence_threshold`는 그대로입니다. 그 설정에서 힌트는 첫 약 30초 창에만 들어가고, 다음 창에는 앞의 인식 결과도 힌트도 넘어가지 않습니다. 그래서 힌트가 쉬는 구간마다 반복되는 고리는 생기지 않습니다. 힌트를 뒤 창까지 옮기려면 이전 문장에 기대야 하고, 그 설정이 무음 구간 환각이 이어지는 원인입니다.
+- faster-whisper와 `--engine modal`은 같은 목록을 `hotwords`로 넘깁니다. 매 인식 창 앞에 붙으며, VAD와 `beam_size=5`는 그대로입니다. `initial_prompt`는 첫 창 이후로 밀려나므로 쓰지 않습니다.
+- 음성 인식 힌트는 약 200자에서 용어 단위로 자르고, 넘치면 앞부분만 넣습니다. `--correct`에는 약 4000자까지 넘깁니다.
+- 용어집은 짧게, 녹음에 실제로 나오는 말만 적으세요. 길거나 말과 무관하면 그 단어를 들은 것처럼 받아쓰는 경우가 있습니다.
+
 ## 결과와 조정
 
 ### 입력 파일 지정
@@ -50,6 +67,8 @@ uv run scripter.py recording.m4a -o files/video.mp4
 uv run scripter.py -i files/20261007.m4a --no-video
 # files/20261007.txt 확인 후 수정 (잘못 인식된 말, 수식 등)
 uv run scripter.py -i files/20261007.m4a --resume --youtube
+# 고치기 전에 오인식·띄어쓰기·수식 마커를 먼저 교정하려면 --correct (아래 참고)
+uv run scripter.py -i files/20261007.m4a --no-video --correct
 ```
 
 `.txt`에는 시각이 없으므로, 언제 나타날지는 `.words.json`의 시각을 씁니다. `.txt`와 원래 인식 결과를 단어 단위로 맞춰 보고, 바뀌지 않은 단어는 원래 시각에, 고친 단어는 그 자리에 있던(바꾼) 단어들이 발화된 구간에 나눠 표시하고, 새로 추가한 단어는 바로 뒤 단어와 함께 나타납니다. 그래서 고친 단어도 대략 말한 때에 나타납니다.
@@ -57,9 +76,41 @@ uv run scripter.py -i files/20261007.m4a --resume --youtube
 - **수식 고치기**: `$$` 와 `$$` 사이의 AsciiMath를 바로 고치면 됩니다(예: `F(x) = int_0^t f(x) dx`). 고친 수식은 원래 수식 구간 동안 공백 단위로 조금씩 나타납니다. 고치지 않은 수식은 원래대로 나타납니다.
 - **수식으로 바꾸기**: "수식시작"이 인식되지 않아 글자로 나온 부분은 그 말을 지우고 그 자리에 `$$ … $$` 문단을 넣으면, 지운 말의 발화 구간에 수식이 나타납니다.
 - 편집하기 쉽도록 `.txt`는 문장(`.`, `?`, `!` 뒤)마다 줄을 바꿉니다. 이 줄바꿈은 편집용이라 영상에서는 공백으로 이어지며, 직접 줄을 바꾸거나 합쳐도 영상은 같습니다. `$$` 앞뒤의 빈 줄도 무시합니다.
-- `--resume`은 `.txt`를 덮어쓰지 않습니다. `.txt`가 없으면 `.words.json`만으로 만듭니다.
+- `--resume`만 쓰면 `.txt`를 덮어쓰지 않습니다. `.txt`가 없으면 `.words.json`만으로 만듭니다. `--resume --correct`는 교정 결과로 `.txt`를 바꿉니다.
 
 `--resume`은 출력 경로(`-o`, 기본 `files/<입력 이름>.mp4`) 옆의 `.words.json`과 `.txt`를 읽으므로 `--transcript`와 함께 쓸 수 없습니다. `.txt`가 내용을 정하므로 `--resume` 전에는 `.words.json`의 글자를 고쳐도 반영되지 않습니다(시각 수정은 반영됩니다).
+
+### 전사문 자동 교정
+
+`--correct`는 전사문에서 잘못 들린 단어, 띄어쓰기, 놓친 "수식시작"/"수식끝"만 고칩니다. OpenAI API를 쓰며 API 요금이 발생합니다. 모델은 `--correct-model`(기본 `gpt-6-luna`, `--youtube-model`과 같은 기본값)입니다. 용어집이 있으면 그 표기를 맥락으로 함께 보냅니다.
+
+교정은 말한 순서와 말한 내용을 유지합니다. 다시 쓰거나, 요약하거나, 문장 순서를 바꾸지 않고, 잘못 들린 단어만 바꿉니다. 이미 있는 `$$ … $$` 수식 블록은 그대로 둡니다. 놓친 수식 마커는 "수식시작"/"수식끝"으로 고친 뒤, 수식 말 규칙으로 `$$ … $$` 문단을 만듭니다. 규칙을 받지 못하면(오프라인 등) 마커는 그 말로 남습니다.
+
+교정 직전 전사문은 `.raw.txt`에 저장하고, 교정 결과는 `.txt`에 씁니다. 바뀐 줄만 출력합니다. `.raw.txt`는 그 실행의 교정 전 내용이라, `--correct`를 다시 실행하면 그때의 `.txt`로 덮어씁니다.
+
+바뀐 단어 비율이 `--correct-threshold`(기본 `0.1`, 10%)를 넘으면 경고하고 `.txt`는 원본을 유지합니다. 차이를 보고 그래도 적용하려면 `--correct-force`. 비율은 단어가 바뀌거나 늘거나 줄면 더 긴 쪽을 셉니다. 띄어쓰기로 한 단어가 둘로 나뉘어도 비율에 들어갑니다. 짧은 전사문이거나 고칠 곳이 많으면 기준을 넘기 쉬우니, 그때는 기준을 올리거나 `--correct-force`를 쓰세요.
+
+긴 전사문은 줄 경계에서 약 2500자씩 나누어 교정합니다. `$$` 블록 중간은 자르지 않습니다. 한 구간이 비거나, 단어의 절반을 넘게 바꾸거나, `$$` 블록 개수가 달라지면 그 구간만 원문을 유지하고 나머지 구간은 이어서 교정합니다. 연결이 한 번 실패하면 그 구간만 한 번 더 시도하고, 인증 오류(HTTP 401·403)면 거기서 멈춥니다.
+
+```sh
+# 인식하고 교정만. 출력된 차이를 본 뒤, 필요하면 .txt를 더 고치고 --resume
+uv run scripter.py -i files/20261007.m4a --no-video --correct
+
+# 인식, 교정, 영상. 유튜브 자료는 교정된 .txt로 만듭니다
+uv run scripter.py -i files/20261007.m4a --correct --youtube
+
+# 이미 만든 .txt를 교정하고 이어서 영상
+uv run scripter.py -i files/20261007.m4a --resume --correct
+
+# 이미 만든 전사문만 교정 (다시 인식하지 않음, 영상 없음)
+uv run scripter.py -i files/20261007.m4a --transcript files/20261007.words.json --no-video --correct
+
+# 기준을 넘겨도 적용
+uv run scripter.py -i files/20261007.m4a --no-video --correct --correct-force
+uv run scripter.py -i files/20261007.m4a --no-video --correct --correct-threshold 0.25 --correct-model gpt-6-luna
+```
+
+`--resume`, `--transcript`, `--chapters`처럼 다시 인식하지 않는 실행에서 `.txt`가 있으면 `--correct`는 그 파일을 고칩니다. 방금 인식한 실행은 새 인식 결과를 고치고, 예전에 고쳐 둔 `.txt`는 쓰지 않습니다. `--correct`는 `--thumbnail`과 함께 쓸 수 없습니다. `--chapters --correct`는 교정된 `.txt`로 챕터를 다시 만듭니다.
 
 ### 생성 구간 지정
 
@@ -81,7 +132,8 @@ uv run scripter.py --transcript files/section.words.json --start 05:00 --end 07:
 ```
 
 - `files/video.mp4`: 1920×1080, 30fps, H.264 + AAC, 16:9.
-- `files/video.txt`: 추출 텍스트.
+- `files/video.txt`: 추출 텍스트. `--correct`를 쓰면 교정본입니다.
+- `files/video.raw.txt`: `--correct`를 썼을 때, 교정 직전의 전사문.
 - `files/video.words.json`: 단어별 시작/종료 시각. 텍스트나 시각을 수정한 뒤 재렌더링할 수 있습니다.
 - `--font-size 80`: 글꼴 크기(px), 기본값 80. 더 크게 표시하려면 96 또는 112를 지정하세요.
 - `--lines 5`: 화면에 쌓이는 최대 줄 수. 글꼴이 커지면 화면 높이에 맞춰 실제 줄 수를 줄입니다. 줄바꿈도 글꼴의 실제 폭에 맞춰 자동 조정됩니다.

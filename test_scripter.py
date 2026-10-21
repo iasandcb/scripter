@@ -4,10 +4,15 @@ import argparse
 import base64
 import io
 import json
+import sys
 import tempfile
 from pathlib import Path
-from unittest.mock import patch
-from scripter import generate_youtube, main, fetch_spoken_math, edit_stream, timed_text, chapter_lines
+from unittest.mock import MagicMock, patch
+from scripter import (
+    generate_youtube, main, fetch_spoken_math, edit_stream, timed_text, chapter_lines,
+    load_glossary, glossary_prompt, word_change_ratio, transcript_chunks, correction_diff,
+    correct_transcript, commit_correction, apply_spoken_math_markers, transcribe, transcribe_mlx,
+    CORRECT_INSTRUCTIONS)
 
 
 class DotenvTests(unittest.TestCase):
@@ -366,6 +371,337 @@ class EditStreamTests(unittest.TestCase):
         for item, at in zip(marks, (2, 3 + 2 / 3, 3 + 2 / 3)):
             self.assertAlmostEqual(item[-1], at)
         self.assertEqual(document_text(edited), ' 값은\n\n$$\nx^2\n$$\n\n이다')
+
+
+def completed(text):
+    return {'status': 'completed', 'output': [{'type': 'message', 'content': [
+        {'type': 'output_text', 'text': json.dumps({'text': text}, ensure_ascii=False)}]}]}
+
+
+def transcript_of(payload):
+    return payload['input'].split('\n\n전사문:\n', 1)[1]
+
+
+class GlossaryTests(unittest.TestCase):
+    def test_load_and_prompt(self):
+        with tempfile.TemporaryDirectory() as folder:
+            path = Path(folder) / 'glossary.txt'
+            path.write_text('# 주석\n\n 마크벡터 \n\n수식시작\n', encoding='utf-8')
+            self.assertEqual(load_glossary(path), ['마크벡터', '수식시작'])
+        prompt, truncated = glossary_prompt(['가나다', '라마바', '사아자'], limit=8)
+        self.assertEqual(prompt, '가나다, 라마바')
+        self.assertTrue(truncated)
+        prompt, truncated = glossary_prompt(['가', '나'], limit=10)
+        self.assertEqual(prompt, '가, 나')
+        self.assertFalse(truncated)
+        self.assertEqual(glossary_prompt([], limit=10), (None, False))
+        prompt, truncated = glossary_prompt(['가나다라마바사'], limit=4)
+        self.assertEqual(prompt, '가나다라')
+        self.assertTrue(truncated)
+
+    def test_mlx_prompt_keeps_silence_guards(self):
+        # mlx applies initial_prompt to the first window only while
+        # condition_on_previous_text stays False, so the hint is not fed
+        # back and cannot restart the silence-repetition loop.
+        mlx, hub = MagicMock(), MagicMock()
+        mlx.transcribe.return_value = {'segments': []}
+        hub.snapshot_download.return_value = '/model'
+        with patch.dict(sys.modules, {'mlx_whisper': mlx, 'huggingface_hub': hub}), patch('sys.stdout'):
+            self.assertEqual(transcribe_mlx(Path('audio.wav'), 'large-v3', 'ko', Path('.models'), 3, prompt='마크벡터'), [])
+        kwargs = mlx.transcribe.call_args.kwargs
+        self.assertFalse(kwargs['condition_on_previous_text'])
+        self.assertEqual(kwargs['hallucination_silence_threshold'], 2.0)
+        self.assertTrue(kwargs['word_timestamps'])
+        self.assertFalse(kwargs['verbose'])
+        self.assertEqual(kwargs['initial_prompt'], '마크벡터')
+        mlx.transcribe.reset_mock()
+        with patch.dict(sys.modules, {'mlx_whisper': mlx, 'huggingface_hub': hub}), patch('sys.stdout'):
+            transcribe_mlx(Path('audio.wav'), 'large-v3', 'ko', Path('.models'), 3)
+        self.assertNotIn('initial_prompt', mlx.transcribe.call_args.kwargs)
+        self.assertFalse(mlx.transcribe.call_args.kwargs['condition_on_previous_text'])
+
+    def test_faster_whisper_uses_hotwords_for_every_window(self):
+        model = MagicMock()
+        model.transcribe.return_value = ((), None)
+        fw = MagicMock()
+        fw.WhisperModel.return_value = model
+        base = dict(language='ko', word_timestamps=True, vad_filter=True, beam_size=5)
+        with patch.dict(sys.modules, {'faster_whisper': fw}), patch('sys.stdout'):
+            transcribe(Path('audio.wav'), 'small', 'ko', Path('.models'), 3)
+        self.assertEqual(model.transcribe.call_args.kwargs, base)
+        self.assertEqual(fw.WhisperModel.call_args.kwargs['device'], 'cpu')
+        model.transcribe.reset_mock()
+        with patch.dict(sys.modules, {'faster_whisper': fw}), patch('sys.stdout'):
+            transcribe(Path('audio.wav'), 'small', 'ko', Path('.models'), 3, prompt='마크벡터')
+        self.assertEqual(model.transcribe.call_args.kwargs, dict(base, hotwords='마크벡터'))
+        self.assertNotIn('initial_prompt', model.transcribe.call_args.kwargs)
+        self.assertNotIn('condition_on_previous_text', model.transcribe.call_args.kwargs)
+
+    def test_modal_hotwords_match_local_faster_whisper(self):
+        from modal_whisper import recognition_options
+        self.assertEqual(recognition_options('ko'),
+                         dict(language='ko', word_timestamps=True, vad_filter=True, beam_size=5))
+        self.assertEqual(recognition_options('ko', '마크벡터')['hotwords'], '마크벡터')
+        self.assertNotIn('initial_prompt', recognition_options('ko', '마크벡터'))
+
+
+class CorrectionTests(unittest.TestCase):
+    def test_word_ratio_and_diff(self):
+        self.assertEqual(word_change_ratio('가 나 다', '가 나 다'), 0)
+        self.assertEqual(word_change_ratio('  가  나', '가 나'), 0)
+        self.assertAlmostEqual(word_change_ratio('가 나 다 라 마', '가 너 다 라 마'), 0.2)
+        self.assertEqual(correction_diff('가\n나\n다', '가\n너\n다'), '-나\n+너')
+        self.assertEqual(correction_diff('같은 줄', '같은 줄'), '')
+
+    def test_chunks_keep_math_blocks_whole(self):
+        text = '앞\n\n$$\nx ^ 2\n$$\n\n' + ('뒤입니다. ' * 30)
+        chunks = transcript_chunks(text, limit=50)
+        self.assertGreater(len(chunks), 1)
+        self.assertEqual(''.join(chunks), text)
+        for chunk in chunks:
+            self.assertEqual(chunk.count('$$') % 2, 0)
+
+    def test_corrects_in_order_and_passes_glossary(self):
+        text = ''.join(f'문장 {index} 입니다.\n' for index in range(8))
+        seen = []
+
+        def fake(endpoint, payload):
+            self.assertEqual(endpoint, 'responses')
+            self.assertEqual(payload['model'], 'gpt-6-luna')
+            self.assertIn('순서를 바꾸', payload['instructions'])
+            self.assertIn('요약', payload['instructions'])
+            self.assertIn('띄어쓰기', payload['instructions'])
+            self.assertIn('수식시작', payload['instructions'])
+            self.assertIn('수식끝', payload['instructions'])
+            self.assertIn('마크벡터', payload['input'])
+            self.assertEqual(payload['instructions'], CORRECT_INSTRUCTIONS)
+            chunk = transcript_of(payload)
+            seen.append(chunk)
+            return completed(chunk.replace('입니다', '이다'))
+
+        with patch('scripter.CORRECT_CHUNK_CHARS', 40), patch('scripter.openai_request', side_effect=fake), \
+             patch('sys.stdout'):
+            corrected, ratio = correct_transcript(text, ['마크벡터'], 'gpt-6-luna')
+        self.assertGreater(len(seen), 1)
+        self.assertEqual(''.join(seen), text)
+        self.assertNotIn('입니다', corrected)
+        self.assertIn('이다', corrected)
+        self.assertGreater(ratio, 0)
+        self.assertLess(ratio, 0.5)
+
+    def test_rejects_a_rewritten_or_broken_chunk_and_retries(self):
+        original = '앞 말\n\n$$\nx\n$$\n\n뒤 문장'
+        calls = {'n': 0}
+
+        def rewrite(endpoint, payload):
+            calls['n'] += 1
+            return completed('전혀 다른 긴 문장으로 다시 썼습니다 그리고 더')
+
+        with patch('scripter.openai_request', side_effect=rewrite), patch('sys.stdout'):
+            corrected, ratio = correct_transcript(original, [], 'gpt-6-luna')
+        self.assertEqual(corrected, original)
+        self.assertEqual(ratio, 0)
+        self.assertEqual(calls['n'], 1)
+
+        def drop_math(endpoint, payload):
+            return completed('앞 말 뒤 문장')
+
+        with patch('scripter.openai_request', side_effect=drop_math), patch('sys.stdout'):
+            corrected, ratio = correct_transcript(original, [], 'gpt-6-luna')
+        self.assertEqual(corrected, original)
+        self.assertEqual(ratio, 0)
+
+        def tweak_formula(endpoint, payload):
+            return completed(transcript_of(payload).replace('말', '것').replace('$$\nx\n$$', '$$\ny\n$$'))
+
+        with patch('scripter.openai_request', side_effect=tweak_formula), patch('sys.stdout'):
+            corrected, ratio = correct_transcript(original, [], 'gpt-6-luna')
+        self.assertIn('$$\nx\n$$', corrected)
+        self.assertIn('것', corrected)
+        self.assertNotIn('$$\ny\n$$', corrected)
+
+        def fail_then_ok(endpoint, payload):
+            calls['n'] += 1
+            if calls['n'] == 1:
+                raise RuntimeError('OpenAI responses 연결 실패. 네트워크를 확인하세요.')
+            return completed(transcript_of(payload).replace('말', '것'))
+
+        calls['n'] = 0
+        with patch('scripter.openai_request', side_effect=fail_then_ok), patch('sys.stdout'):
+            corrected, ratio = correct_transcript(original, [], 'gpt-6-luna')
+        self.assertEqual(calls['n'], 2)
+        self.assertIn('것', corrected)
+
+        with patch('scripter.openai_request', side_effect=RuntimeError('OpenAI responses 요청 실패 (HTTP 401).')), \
+             patch('sys.stdout'):
+            with self.assertRaises(RuntimeError):
+                correct_transcript(original, [], 'gpt-6-luna')
+
+    def test_threshold_keeps_or_forces(self):
+        with tempfile.TemporaryDirectory() as folder:
+            raw, document = Path(folder) / 'v.raw.txt', Path(folder) / 'v.txt'
+            with patch('sys.stdout', new_callable=io.StringIO) as printed:
+                kept = commit_correction('원문', '교정', 0.2, 0.1, False, raw, document)
+            self.assertEqual(kept, '원문')
+            self.assertEqual(document.read_text(encoding='utf-8'), '원문')
+            self.assertEqual(raw.read_text(encoding='utf-8'), '원문')
+            self.assertIn('원본 전사문을 유지합니다', printed.getvalue())
+            self.assertIn('-원문', printed.getvalue())
+            with patch('sys.stdout'):
+                kept = commit_correction('원문', '교정', 0.2, 0.1, True, raw, document)
+            self.assertEqual(kept, '교정')
+            self.assertEqual(document.read_text(encoding='utf-8'), '교정')
+            with patch('sys.stdout', new_callable=io.StringIO) as printed:
+                kept = commit_correction('원문', '원문', 0, 0.1, False, raw, document)
+            self.assertEqual(kept, '원문')
+            self.assertIn('바꿀 줄이 없습니다', printed.getvalue())
+
+    def test_markers_become_formulas_and_still_align(self):
+        plain = '값은 수식시작 엑스 수식끝 입니다'
+        converted = apply_spoken_math_markers(plain, SPOKEN)
+        self.assertNotIn('수식시작', converted)
+        self.assertIn('$$', converted)
+        self.assertIn('x', converted)
+        self.assertIn('값은', converted)
+        self.assertIn('입니다', converted)
+        kept = '앞\n\n$$\nF(x)\n$$\n\n뒤'
+        self.assertEqual(apply_spoken_math_markers(kept, SPOKEN), kept)
+        self.assertEqual(apply_spoken_math_markers(plain, None), plain)
+        words = [{'text': '값은', 'start': 0, 'end': 1}, {'text': ' 수직시작', 'start': 1, 'end': 2},
+                 {'text': ' 엑스', 'start': 2, 'end': 3}, {'text': ' 수직끝', 'start': 3, 'end': 4},
+                 {'text': ' 입니다', 'start': 4, 'end': 5}]
+        stream = typing_stream(words)
+        original = document_text(stream)
+        corrected = apply_spoken_math_markers(original.replace('수직시작', '수식시작').replace('수직끝', '수식끝'), SPOKEN)
+        edited = edit_stream(stream, corrected)
+        maths = [item for item in edited if item[0] == 'math']
+        self.assertTrue(maths)
+        self.assertTrue(all(1 <= item[-1] <= 4 for item in maths))
+        self.assertIn('입니다', ''.join(item[1] for item in edited if item[0] == 'text'))
+
+
+class CorrectionCliTests(unittest.TestCase):
+    def stage(self, argv, words=None):
+        transcribe = MagicMock(return_value=words or [{'text': '안녕하세요', 'start': 1, 'end': 2}])
+        stdout = io.StringIO()
+        with patch('sys.argv', ['scripter.py', *argv]), \
+             patch.dict('os.environ', {'OPENAI_API_KEY': 'test'}), \
+             patch('scripter.shutil.which', return_value='tool'), \
+             patch('scripter.fetch_spoken_math', return_value=None), \
+             patch('scripter.Path.is_file', lambda path: path.suffix in ('.m4a', '.ttc') or path.exists()), \
+             patch('scripter.probe', return_value=30), patch('scripter.mlx_available', return_value=False), \
+             patch('scripter.transcribe', transcribe), patch('scripter.render') as render, \
+             patch('scripter.generate_youtube') as youtube, patch('sys.stdout', stdout), patch('sys.stderr'):
+            main()
+        return transcribe, render, youtube, stdout
+
+    def test_no_video_corrects_and_resume_corrects_existing_text(self):
+        sentence = ' '.join('가나다라마바사아자차카타파하거너더러머버서')
+        words = [{'text': sentence.split()[0] if index == 0 else ' ' + word, 'start': float(index), 'end': float(index + 1)}
+                 for index, word in enumerate(sentence.split())]
+
+        def fix(expected):
+            def fake(endpoint, payload):
+                self.assertEqual(payload['model'], expected)
+                return completed(transcript_of(payload).replace('나', '너', 1))
+            return fake
+
+        with tempfile.TemporaryDirectory() as folder:
+            audio, output = Path(folder) / 'audio.m4a', Path(folder) / 'video.mp4'
+            with patch('scripter.openai_request', side_effect=fix('gpt-6-luna')):
+                transcribe, render, youtube, stdout = self.stage(
+                    ['-i', str(audio), '-o', str(output), '--no-video', '--correct'], words)
+            render.assert_not_called()
+            youtube.assert_not_called()
+            transcribe.assert_called_once()
+            self.assertIsNone(transcribe.call_args.kwargs['prompt'])
+            original = output.with_suffix('.raw.txt').read_text(encoding='utf-8')
+            corrected = output.with_suffix('.txt').read_text(encoding='utf-8')
+            self.assertIn('나', original)
+            self.assertIn('너', corrected)
+            self.assertIn('-', stdout.getvalue())
+            self.assertIn('+', stdout.getvalue())
+            output.with_suffix('.txt').write_text(original, encoding='utf-8')
+            with patch('scripter.openai_request', side_effect=fix('edit-model')):
+                transcribe, render, youtube, stdout = self.stage(
+                    ['-i', str(audio), '-o', str(output), '--resume', '--correct', '--youtube', '--correct-model', 'edit-model'], words)
+            transcribe.assert_not_called()
+            self.assertEqual(render.call_args.args[1], output)
+            self.assertIn('너', youtube.call_args.args[0])
+            self.assertIn('너', ''.join(item[1] for item in render.call_args.args[2] if item[0] == 'text'))
+            output.with_suffix('.txt').write_text(original, encoding='utf-8')
+            with patch('scripter.openai_request', side_effect=fix('gpt-6-luna')):
+                transcribe, render, youtube, _ = self.stage(
+                    ['-i', str(audio), '-o', str(output), '--transcript', str(output.with_suffix('.words.json')),
+                     '--no-video', '--correct'], words)
+            transcribe.assert_not_called()
+            render.assert_not_called()
+            youtube.assert_not_called()
+            self.assertIn('너', output.with_suffix('.txt').read_text(encoding='utf-8'))
+
+    def test_threshold_and_glossary_flags(self):
+        sentence = ' '.join(list('가나다라마바사아'))
+        words = [{'text': sentence.split()[0] if index == 0 else ' ' + word, 'start': float(index), 'end': float(index + 1)}
+                 for index, word in enumerate(sentence.split())]
+
+        def rewrite(endpoint, payload):
+            # Two words of eight: over the 10% guard, under the per-chunk reject.
+            text = transcript_of(payload)
+            return completed(text.replace('나', '너', 1).replace('다', '더', 1))
+
+        with tempfile.TemporaryDirectory() as folder:
+            audio, output = Path(folder) / 'audio.m4a', Path(folder) / 'video.mp4'
+            glossary = Path(folder) / 'terms.txt'
+            glossary.write_text('# c\n\n마크벡터\n수식시작\n', encoding='utf-8')
+            with patch('scripter.openai_request', side_effect=rewrite):
+                transcribe, render, _, stdout = self.stage(
+                    ['-i', str(audio), '-o', str(output), '--no-video', '--correct', '--glossary', str(glossary)], words)
+            self.assertEqual(transcribe.call_args.kwargs['prompt'], '마크벡터, 수식시작')
+            self.assertEqual(output.with_suffix('.txt').read_text(encoding='utf-8'),
+                             output.with_suffix('.raw.txt').read_text(encoding='utf-8'))
+            self.assertIn('원본 전사문을 유지합니다', stdout.getvalue())
+            with patch('scripter.openai_request', side_effect=rewrite):
+                _, _, _, stdout = self.stage(
+                    ['-i', str(audio), '-o', str(output), '--no-video', '--correct', '--correct-force'], words)
+            self.assertIn('--correct-force', stdout.getvalue())
+            self.assertIn('너', output.with_suffix('.txt').read_text(encoding='utf-8'))
+
+        with tempfile.TemporaryDirectory() as folder:
+            audio, output = Path(folder) / 'audio.m4a', Path(folder) / 'video.mp4'
+            glossary = Path(folder) / 'terms.txt'
+            glossary.write_text('마크벡터\n', encoding='utf-8')
+            def capture_run(argv):
+                mock = MagicMock(return_value=[{'text': '안녕하세요', 'start': 1, 'end': 2}])
+                with patch('sys.argv', ['scripter.py', *argv]), \
+                     patch.dict('os.environ', {'OPENAI_API_KEY': 'test'}), \
+                     patch('scripter.shutil.which', return_value='tool'), \
+                     patch('scripter.fetch_spoken_math', return_value=None), \
+                     patch('scripter.Path.is_file', lambda path: path.suffix in ('.m4a', '.ttc') or path.exists()), \
+                     patch('scripter.probe', return_value=10), patch('scripter.mlx_available', return_value=True), \
+                     patch('scripter.transcribe_mlx', mock), patch('scripter.render'), \
+                     patch('scripter.GLOSSARY_PATH', glossary), patch('sys.stdout'), patch('sys.stderr'):
+                    main()
+                return mock
+
+            disabled = capture_run(['-i', str(audio), '-o', str(output), '--no-video', '--engine', 'mlx', '--glossary', ''])
+            self.assertIsNone(disabled.call_args.kwargs['prompt'])
+            used = capture_run(['-i', str(audio), '-o', str(output), '--no-video', '--engine', 'mlx'])
+            self.assertEqual(used.call_args.kwargs['prompt'], '마크벡터')
+
+    def test_flag_errors(self):
+        with tempfile.TemporaryDirectory() as folder:
+            audio = str(Path(folder) / 'audio.m4a')
+            for argv in (['--correct', '--thumbnail'], ['--correct-force'],
+                         ['--no-video', '--correct', '--glossary', str(Path(folder) / 'missing.txt')]):
+                with patch('sys.stderr'), self.assertRaises(SystemExit):
+                    self.stage(['-i', audio, *argv])
+            with patch('sys.argv', ['scripter.py', '-i', audio, '--no-video', '--correct']), \
+                 patch.dict('os.environ', {'OPENAI_API_KEY': ''}, clear=False), \
+                 patch('scripter.shutil.which', return_value='tool'), \
+                 patch('scripter.fetch_spoken_math', return_value=None), \
+                 patch('scripter.Path.is_file', lambda path: True), \
+                 patch('sys.stderr'), self.assertRaises(SystemExit):
+                main()
 
 
 if __name__ == '__main__':
