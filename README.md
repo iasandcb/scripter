@@ -229,7 +229,11 @@ API 구현 참고: [Structured Outputs](https://developers.openai.com/api/docs/g
 
 ## 유튜브에 올리기
 
-YouTube Data API v3로 영상을 올립니다. `videos.insert` 재개 업로드(resumable)와 `thumbnails.set`을 쓰고, 제목·설명·챕터는 `.youtube.json`에서 읽습니다. 언어는 한국어(`defaultLanguage`, `defaultAudioLanguage`)입니다. 카테고리 기본값은 Education(`27`)이고 `.env`의 `YOUTUBE_CATEGORY_ID`로 바꿉니다. 아동용 아님(`selfDeclaredMadeForKids: false`)으로 선언합니다. 아동용 영상이면 이 업로드를 쓰지 마세요.
+YouTube Data API v3로 영상을 올립니다. `videos.insert` 재개 업로드(resumable)와 `thumbnails.set`을 쓰고, 제목·설명·챕터는 `.youtube.json`에서 읽습니다. 언어는 한국어(`defaultLanguage`, `defaultAudioLanguage`)입니다. 아동용 아님(`selfDeclaredMadeForKids: false`)으로 선언합니다. 아동용 영상이면 이 업로드를 쓰지 마세요.
+
+올릴 때 제목, 설명, 교정된 전사문(`.txt`)으로 카테고리 하나와 태그 몇 개를 고릅니다. 네트워크나 API 키는 쓰지 않습니다. 미적분처럼 과학·기술 내용이면 Science & Technology(`28`), 한국사 수업이면 Education(`27`), 일상 브이로그면 People & Blogs(`22`)입니다. 맞는 주제가 없으면 Education(`27`)입니다. 태그는 내용에 나온 한국어와 영어를 섞고, 하나당 30자 이하입니다. 유튜브가 세는 길이(태그 사이 쉼표, 공백이 있는 태그의 따옴표 포함)는 500자 미만입니다.
+
+직접 적은 값이 자동 분류보다 우선합니다. 우선순위는 `--category`/`--tags`, `.youtube.json`의 `categoryId`/`tags`, 환경 변수 `YOUTUBE_CATEGORY_ID`/`YOUTUBE_TAGS`입니다. 카테고리와 태그는 따로 덮어쓸 수 있습니다. 이미 올라간 영상(`*.youtube-upload.json`에 영상 id가 있는 경우)은 다시 올리지 않고, 카테고리와 태그도 바꾸지 않습니다.
 
 공개 범위 기본값은 **`private`**입니다. 검증되지 않은 API 프로젝트는 비공개만 올릴 수 있습니다. 스튜디오에서 확인한 뒤 직접 공개하세요. `--upload`만 `--privacy unlisted` 또는 `public`을 받을 수 있고, 워커는 `private`만 허용합니다.
 
@@ -238,6 +242,7 @@ YouTube Data API v3로 영상을 올립니다. `videos.insert` 재개 업로드(
 ```sh
 uv run scripter.py --upload -o files/20261007.mp4
 uv run scripter.py --upload -o files/20261007.mp4 --privacy private
+uv run scripter.py --upload -o files/20261007.mp4 --category 28 --tags "수학,적분,calculus"
 ```
 
 ### 한 번만 하는 설정
@@ -262,7 +267,7 @@ uv run scripter.py --youtube-auth
 
 mark-vector는 맥을 호출하지 않습니다. 이 맥이 `https://markvector.fly.dev`의 큐를 가져갑니다(다른 주소는 `WORKER_BASE_URL`). 인증은 `WORKER_TOKEN`입니다.
 
-워커는 작업을 하나 빌려(`lease`, 기본 1시간) 음성을 받고, 용어집과 `--correct`, 영상, `--youtube` 자료(제목·설명·챕터·썸네일)를 만든 뒤 비공개로 올립니다. 끝난 뒤 영상 id, 주소, 교정된 전사문(`.txt`)을 큐에 보고합니다. 오래 걸리는 렌더 중에는 약 2분마다 진행을 보내 임대를 갱신합니다. Apple Silicon에서는 평소와 같이 mlx `large-v3`를 씁니다.
+워커는 작업을 하나 빌려(`lease`, 기본 1시간) 음성을 받고, 용어집과 `--correct`, 영상, `--youtube` 자료(제목·설명·챕터·썸네일)를 만든 뒤 비공개로 올립니다. 카테고리와 태그는 그때의 제목·설명·교정된 전사문으로 채웁니다. 끝난 뒤 영상 id, 주소, 교정된 전사문(`.txt`)을 큐에 보고합니다. 오래 걸리는 렌더 중에는 약 2분마다 진행을 보내 임대를 갱신합니다. Apple Silicon에서는 평소와 같이 mlx `large-v3`를 씁니다.
 
 대기 중에는 잠자기 방지(caffeinate)를 켜지 않습니다. 작업을 처리하는 동안에만 `caffeinate -i`로 유휴 잠자기를 막습니다. 뚜껑을 닫으면 맥은 그래도 잠듭니다. 잠든 동안에는 큐를 보지 않고, 작업 중이었다면 임대가 끝나 작업이 큐로 돌아갑니다. 깨어난 뒤 같은 작업을 다시 받으면, 이미 올린 영상은 다시 올리지 않고 완료 보고만 재시도합니다. 이 기록은 이 맥의 `files/worker/<작업 id>/state.json`과 `video.youtube-upload.json`에 있습니다. 완료되기 전에 지우면 같은 영상이 한 번 더 올라갈 수 있습니다.
 
