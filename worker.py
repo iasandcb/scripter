@@ -755,7 +755,8 @@ def serve(args, install_signals=True):
     def upload(output, on_progress=None):
         return youtube_upload.upload_rendered(
             output, privacy='private', client_secret=args.client_secret, token_file=token_file,
-            interactive=False, on_progress=on_progress)
+            interactive=False, category=getattr(args, 'category', None),
+            tags=getattr(args, 'tags', None), on_progress=on_progress)
 
     client = WorkerClient(token, url, identifier, lease)
     stop = threading.Event()

@@ -413,6 +413,21 @@ class CliTests(unittest.TestCase):
         serve.assert_called_once()
         self.assertTrue(serve.call_args.args[0].once)
 
+    def test_category_and_tags_are_upload_overrides(self):
+        with patch('sys.stderr'), self.assertRaises(SystemExit):
+            main(['--category', '28'])
+        with patch('worker.serve') as serve, patch('sys.stderr'), \
+             patch.dict(os.environ, {'WORKER_TOKEN': 'token', 'OPENAI_API_KEY': 'key'}), \
+             self.assertRaises(SystemExit):
+            main(['--worker', '--category', '99'])
+        serve.assert_not_called()
+        with patch('worker.serve') as serve, \
+             patch.dict(os.environ, {'WORKER_TOKEN': 'token', 'OPENAI_API_KEY': 'key'}):
+            main(['--worker', '--once', '--category', '22', '--tags', '일상,브이로그'])
+        args = serve.call_args.args[0]
+        self.assertEqual(args.category, '22')
+        self.assertEqual(args.tags, '일상,브이로그')
+
     def test_allow_missing_thumbnail_continues(self):
         words = [{'text': '안녕하세요', 'start': 1, 'end': 2}]
 

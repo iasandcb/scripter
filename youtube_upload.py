@@ -3,6 +3,11 @@
 Default privacy is private. An unverified API project can only upload private
 videos, and the channel owner publishes from YouTube Studio. A thumbnail
 rejection (the channel is often unverified) does not undo the video upload.
+
+categoryId and tags are filled from the title, description, and corrected
+transcript. A value passed in, stored in `.youtube.json`, or set with
+YOUTUBE_CATEGORY_ID / YOUTUBE_TAGS overrides that per field. A video id
+already on disk is not uploaded again and its snippet is not changed.
 """
 import base64
 import hashlib
@@ -15,6 +20,7 @@ from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 
 from net import atomic_write, error_text, header, request
+from youtube_classify import CATEGORIES, category_id, normalize_tags, resolve_category_and_tags
 
 
 SCOPES = (
@@ -28,12 +34,32 @@ CHUNK = 8 * 1024 * 1024
 ROOT = Path(__file__).resolve().parent
 
 
-def category_id(value=None):
-    """YouTube video category. 27 is Education."""
-    chosen = value or os.environ.get('YOUTUBE_CATEGORY_ID', '').strip() or '27'
-    if not str(chosen).isdigit():
-        raise RuntimeError('YOUTUBE_CATEGORY_ID는 숫자여야 합니다.')
-    return str(chosen)
+def read_transcript(video_path):
+    """The corrected transcript beside a render. `.raw.txt` is the pre-correction copy."""
+    path = Path(video_path).with_suffix('.txt')
+    if not path.is_file():
+        return ''
+    try:
+        return path.read_text(encoding='utf-8')
+    except (OSError, UnicodeError):
+        return ''
+
+
+def validate_override(category=None, tags=None):
+    """Reject a bad manual category or tag list before any upload starts."""
+    if category is not None and str(category).strip():
+        category_id(category)
+    if tags is not None:
+        normalize_tags(tags, required=True)
+
+
+def _log_classification(body):
+    snippet = body.get('snippet') or {}
+    cid = str(snippet.get('categoryId') or '')
+    name = CATEGORIES.get(cid, '')
+    print(f'유튜브 분류: {cid} {name}'.rstrip(), flush=True)
+    tags = snippet.get('tags') or []
+    print('유튜브 태그: ' + (', '.join(tags) if tags else '(없음)'), flush=True)
 
 
 def resolve_client_secret(path=None):
@@ -164,8 +190,12 @@ def description_with_chapters(metadata, limit=5000):
     return description[:limit]
 
 
-def video_body(metadata, privacy='private', category='27'):
-    """videos.insert snippet and status. Language is Korean."""
+def video_body(metadata, privacy='private', category=None, tags=None, transcript=None):
+    """videos.insert snippet and status. Language is Korean.
+
+    With no override, categoryId and tags are chosen from the title,
+    description, chapters, and corrected transcript.
+    """
     if privacy not in ('private', 'unlisted', 'public'):
         raise RuntimeError('privacyStatus는 private, unlisted, public 중 하나여야 합니다.')
     if not isinstance(metadata, dict):
@@ -175,14 +205,19 @@ def video_body(metadata, privacy='private', category='27'):
         raise RuntimeError('유튜브 제목이 비어 있습니다.')
     if len(title) > 100:
         title = title[:100].rstrip()
+    resolved = resolve_category_and_tags(
+        metadata, transcript=transcript or '', category=category, tags=tags)
+    snippet = {
+        'title': title,
+        'description': description_with_chapters(metadata),
+        'categoryId': resolved['categoryId'],
+        'defaultLanguage': 'ko',
+        'defaultAudioLanguage': 'ko',
+    }
+    if resolved['tags']:
+        snippet['tags'] = resolved['tags']
     return {
-        'snippet': {
-            'title': title,
-            'description': description_with_chapters(metadata),
-            'categoryId': category_id(category),
-            'defaultLanguage': 'ko',
-            'defaultAudioLanguage': 'ko',
-        },
+        'snippet': snippet,
         'status': {
             'privacyStatus': privacy,
             'selfDeclaredMadeForKids': False,
@@ -381,19 +416,31 @@ class YouTubeClient:
         except TypeError:
             return self.transport(method, url, data, headers, timeout)
 
-    def upload(self, video_path, metadata, privacy='private', category=None, on_progress=None):
-        """Resumable videos.insert, then thumbnails.set. Thumbnail errors are returned, not raised."""
+    def upload(self, video_path, metadata, privacy='private', category=None, tags=None,
+               transcript=None, on_progress=None):
+        """Resumable videos.insert, then thumbnails.set. Thumbnail errors are returned, not raised.
+
+        If a video id is already recorded beside the file, that video is not
+        uploaded again and videos.update is not called. Category and tags are
+        sent only with a new insert.
+        """
         video_path = Path(video_path)
         if not video_path.is_file() or video_path.stat().st_size <= 0:
             raise RuntimeError(f'업로드할 영상이 없습니다: {video_path}')
-        body = video_body(metadata, privacy=privacy, category=category)
+        if transcript is None:
+            transcript = read_transcript(video_path)
         size = video_path.stat().st_size
         marker = marker_path(video_path)
         saved = _load_marker(marker)
         video = None
-        if saved.get('youtube_video_id'):
+        already = bool(saved.get('youtube_video_id'))
+        body = None
+        if already:
+            # The snippet was sent with the original insert. Do not classify
+            # again and do not call videos.update.
             video = {'id': saved['youtube_video_id']}
         else:
+            body = video_body(metadata, privacy=privacy, category=category, tags=tags, transcript=transcript)
             session = saved.get('upload_url') if saved.get('bytes') == size else None
             video, session = self._send_video(video_path, body, size, session, on_progress)
             saved = {
@@ -403,6 +450,8 @@ class YouTubeClient:
                 'youtube_url': watch_url(video['id']),
                 'privacy': privacy,
                 'thumbnail': False,
+                'categoryId': body['snippet']['categoryId'],
+                'tags': list(body['snippet'].get('tags') or []),
             }
             _save_marker(marker, saved)
         video_id = video['id']
@@ -415,7 +464,11 @@ class YouTubeClient:
             thumbnail = self._thumbnail(video_id, image)
             saved.update({'youtube_video_id': video_id, 'youtube_url': url, 'privacy': privacy, 'thumbnail': thumbnail, 'bytes': size})
             _save_marker(marker, saved)
-        return {'youtube_video_id': video_id, 'youtube_url': url, 'thumbnail': thumbnail if image.is_file() else None}
+        result = {'youtube_video_id': video_id, 'youtube_url': url, 'thumbnail': thumbnail if image.is_file() else None}
+        if not already:
+            result['categoryId'] = body['snippet']['categoryId']
+            result['tags'] = list(body['snippet'].get('tags') or [])
+        return result
 
     def _send_video(self, video_path, body, size, session, on_progress):
         if session is None:
@@ -492,6 +545,7 @@ class YouTubeClient:
         raise RuntimeError('영상 업로드가 끝나기 전에 파일의 끝에 닿았습니다.')
 
     def _start_session(self, body, size):
+        _log_classification(body)
         raw_body = json.dumps(body, ensure_ascii=False).encode('utf-8')
         headers = {
             'Authorization': self.credentials.authorization(),
@@ -560,7 +614,7 @@ def watch_url(video_id):
 
 
 def upload_rendered(output, privacy='private', client_secret=None, token_file=None,
-                    interactive=None, category=None, transport=request, on_progress=None):
+                    interactive=None, category=None, tags=None, transport=request, on_progress=None):
     """Upload an existing render. `output` is the .mp4 path."""
     output = Path(output)
     meta_path = output.with_suffix('.youtube.json')
@@ -580,12 +634,15 @@ def upload_rendered(output, privacy='private', client_secret=None, token_file=No
             raise RuntimeError('유튜브 갱신 토큰이 없습니다. 터미널에서 uv run scripter.py --youtube-auth 를 실행하세요.')
         authorize_interactive(secret, token, transport=transport)
     client = YouTubeClient(credentials, transport=transport)
-    return client.upload(output, metadata, privacy=privacy, category=category, on_progress=on_progress)
+    return client.upload(output, metadata, privacy=privacy, category=category, tags=tags,
+                         on_progress=on_progress)
 
 
-def upload_command(output, privacy='private', client_secret=None, token_file=None):
+def upload_command(output, privacy='private', client_secret=None, token_file=None,
+                   category=None, tags=None):
     result = upload_rendered(output, privacy=privacy, client_secret=client_secret,
-                             token_file=token_file, interactive=True)
+                             token_file=token_file, interactive=True,
+                             category=category, tags=tags)
     print(f"업로드 완료: {result['youtube_url']}", flush=True)
     if result.get('thumbnail') is False:
         print('썸네일은 올리지 못했습니다. 영상은 비공개로 올라가 있습니다. 유튜브 스튜디오에서 확인하세요.', flush=True)

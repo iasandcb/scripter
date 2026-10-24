@@ -1020,7 +1020,7 @@ def run_service(args, parser):
     if args.upload:
         output = worker.resolve_upload_target(args, parser)
         youtube_upload.upload_command(output, privacy=args.privacy, client_secret=args.client_secret,
-                                      token_file=args.token_file)
+                                      token_file=args.token_file, category=args.category, tags=args.tags)
         return
     worker.serve(args)
 
@@ -1040,6 +1040,13 @@ def main(argv=None):
                         help='유튜브 OAuth 동의(브라우저) 후 갱신 토큰을 로컬에 저장')
     parser.add_argument('--privacy', choices=('private', 'unlisted', 'public'), default='private',
                         help='--upload 공개 범위 (기본 private. 검증되지 않은 API 프로젝트는 private만 업로드됨)')
+    parser.add_argument('--category', default=None,
+                        help='업로드 categoryId를 직접 지정 (예: 27 Education, 28 Science & Technology, '
+                             '22 People & Blogs). 생략하면 제목·설명·교정된 전사문으로 고릅니다. '
+                             '.youtube.json의 categoryId, 환경 변수 YOUTUBE_CATEGORY_ID도 자동 분류보다 우선합니다.')
+    parser.add_argument('--tags', default=None,
+                        help='업로드 태그를 직접 지정 (쉼표로 구분, 합계 500자 미만). '
+                             '생략하면 내용에서 고릅니다. .youtube.json의 tags, 환경 변수 YOUTUBE_TAGS도 우선합니다.')
     parser.add_argument('--worker', action='store_true',
                         help='mark-vector 작업 큐를 폴링해 전사·교정·영상·유튜브 비공개 업로드까지 처리')
     parser.add_argument('--once', action='store_true',
@@ -1102,6 +1109,13 @@ def main(argv=None):
                         '빈 값이면 받지 않고 저장된 파일만 사용')
     args = parser.parse_args(argv)
     worker.validate_worker_args(args, parser)
+    if args.category or args.tags is not None:
+        if not (args.upload or args.worker):
+            parser.error('--category와 --tags는 --upload 또는 --worker와 함께 쓰세요.')
+        try:
+            youtube_upload.validate_override(args.category, args.tags)
+        except RuntimeError as error:
+            parser.error(str(error))
     if args.youtube_auth or args.upload or args.worker:
         run_service(args, parser)
         return
