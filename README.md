@@ -263,6 +263,34 @@ uv run scripter.py --youtube-auth
 
 기본 할당량은 하루 10,000 유닛이고 `videos.insert`는 1,600 유닛입니다. 기본 할당량으로는 하루에 영상을 여섯 개 남짓 올릴 수 있습니다.
 
+## 유튜브 오디오를 마크벡터에 넣기
+
+`youtube_ingest.py`는 유튜브 주소의 음성만 받아 mark-vector에 넣습니다. 영상을 만들거나 요약하지 않습니다. yt-dlp로 m4a 원본 스트림만 받습니다. `-x`로 뽑거나 다시 인코딩하지 않습니다.
+
+토큰은 `~/.config/markvector/ingest_token`에 한 줄로 둡니다. 스크립트는 실행할 때 그 파일을 읽고, 토큰을 출력하거나 로그에 남기거나 저장소에 넣지 않습니다.
+
+```sh
+mkdir -p ~/.config/markvector
+touch ~/.config/markvector/ingest_token
+chmod 600 ~/.config/markvector/ingest_token
+# 파일에는 토큰 한 줄만 적습니다. 저장소나 셸 기록에 넣지 마세요.
+uv run youtube_ingest.py 'https://www.youtube.com/watch?v=...'
+```
+
+받은 m4a는 `files/`에 영상 제목으로 남습니다. 다른 폴더는 `--output-dir`. 제목에 쉼표나 따옴표가 있어도 그 이름 그대로 올립니다. 끝나면 응답의 project id와 conversation id를 출력합니다.
+
+업로드는 `POST https://markvector.fly.dev/api/ingest/audio` 입니다. multipart 필드 이름은 `file`이고, 폼 필드 `enqueue=false`를 함께 보냅니다. 헤더는 `Authorization: Bearer <토큰>`입니다. `enqueue=false`라서 워커 큐에는 들어가지 않습니다. 주소를 바꾸려면 `--base-url`, 토큰 파일을 바꾸려면 `--token-file`.
+
+이 컴퓨터가 YouTube 봇 확인에 막히면, yt-dlp가 설치된 다른 맥에서 받을 수 있습니다. 그 맥에는 ffmpeg가 없어도 됩니다(Homebrew의 yt-dlp만 있으면 됩니다). 파일을 가져온 뒤 ffmpeg가 있는 이쪽에서 `ffmpeg -c copy`로 리먹스합니다.
+
+```sh
+uv run youtube_ingest.py 'https://www.youtube.com/watch?v=...' --via-ssh user@macbook
+```
+
+`user@macbook`은 `~/.ssh/config`의 호스트여도 됩니다. 원격 명령의 PATH에는 `/opt/homebrew/bin`과 `/usr/local/bin`을 붙입니다. 포트가 필요하면 그 설정에 적으세요.
+
+yt-dlp가 없으면 `brew install yt-dlp`. `--via-ssh`를 쓸 때만 이쪽에 ffmpeg가 필요합니다(`brew install ffmpeg`). m4a 스트림이 없는 영상은 받지 않습니다.
+
 ## 마크벡터 작업 큐
 
 mark-vector는 맥을 호출하지 않습니다. 이 맥이 `https://markvector.fly.dev`의 큐를 가져갑니다(다른 주소는 `WORKER_BASE_URL`). 인증은 `WORKER_TOKEN`입니다.
