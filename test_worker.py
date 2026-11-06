@@ -151,7 +151,7 @@ class PipelineCommandTests(unittest.TestCase):
         import argparse
         options = argparse.Namespace(
             engine='auto', language='ko', youtube_model='gpt-6-luna',
-            youtube_image_model='gpt-image-2.5-flare', correct_model='gpt-6-luna',
+            youtube_image_model='gpt-image-2.6-flare', correct_model='gpt-6-luna',
             correct_threshold=0.1, correct_force=False, model=None, glossary=None,
             spoken_math=None, spoken_math_url='', width=1920, height=1080, fps=30,
             font=Path('/System/Library/Fonts/AppleSDGothicNeo.ttc'), font_size=80,
