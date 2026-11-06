@@ -100,6 +100,7 @@ class YoutubeTests(unittest.TestCase):
                 main()
             self.assertEqual(api.call_count, 1)
             self.assertEqual(api.call_args.args[1]['prompt'], '고친 그림 지시')
+            self.assertEqual(api.call_args.args[1]['model'], 'gpt-image-2.6-flare')
             render.assert_not_called()
             transcribe.assert_not_called()
             self.assertEqual(json.loads(output.with_suffix('.youtube.json').read_text())['thumbnail_prompt'], '고친 그림 지시')

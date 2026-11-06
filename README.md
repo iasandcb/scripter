@@ -198,7 +198,7 @@ uv run scripter.py --youtube
 uv run scripter.py -i files/20261007.m4a --duration 02:00 --youtube
 ```
 
-기본적으로 제목·설명은 `gpt-6-luna`, 썸네일은 `gpt-image-2.5-flare`로 생성합니다. `--youtube-model`, `--youtube-image-model`로 각각 변경할 수 있습니다. 이미지 모델은 GPT Image API의 `1536x1024` PNG 생성을 지원해야 합니다.
+기본적으로 제목·설명은 `gpt-6-luna`, 썸네일은 `gpt-image-2.6-flare`로 생성합니다. `--youtube-model`, `--youtube-image-model`로 각각 변경할 수 있습니다. 이미지 모델은 GPT Image API의 `1536x1024` PNG 생성을 지원해야 합니다.
 
 예를 들어 입력이 `files/20261007.m4a`이면 다음 결과가 저장됩니다.
 
@@ -220,7 +220,7 @@ uv run scripter.py --chapters
 
 ```sh
 uv run scripter.py --thumbnail
-uv run scripter.py -i files/20261007.m4a --thumbnail --youtube-image-model gpt-image-2.5-flare
+uv run scripter.py -i files/20261007.m4a --thumbnail --youtube-image-model gpt-image-2.6-flare
 ```
 
 선택한 구간의 전사문 전체에서 자료를 생성합니다. 썸네일 요청에 실패해도 영상·전사문·제목·설명은 보존합니다. 생성된 내용은 확인 후 사용하세요. 만든 영상을 올리는 방법은 아래 "유튜브에 올리기"를 보세요. `--allow-missing-thumbnail`을 붙이면 썸네일 생성만 실패해도 그대로 끝납니다(워커가 이 옵션을 켭니다).

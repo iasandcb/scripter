@@ -1066,7 +1066,7 @@ def main(argv=None):
     parser.add_argument('--token-file', type=Path, default=None,
                         help='유튜브 갱신 토큰 파일 (기본 .youtube-token.json, YOUTUBE_TOKEN_FILE)')
     parser.add_argument('--youtube-model', default=TEXT_MODEL, help='제목·설명 생성 모델')
-    parser.add_argument('--youtube-image-model', default='gpt-image-2.5-flare', help='썸네일 생성 모델')
+    parser.add_argument('--youtube-image-model', default='gpt-image-2.6-flare', help='썸네일 생성 모델')
     parser.add_argument('--glossary', default=None,
                         help='자주 나오는 용어·이름 파일 (한 줄에 하나, # 주석은 무시). '
                              f'생략하면 {GLOSSARY_PATH}가 있을 때만 음성 인식과 --correct에 사용. '
